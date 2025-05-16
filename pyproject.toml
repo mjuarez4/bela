@@ -1,0 +1,20 @@
+[project]
+name = "bela"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "egomimic",
+    "flax>=0.10.6",
+    "huggingface-hub[hf-xet]>=0.31.2",
+    "jax>=0.6.0",
+    "lerobot",
+    "numpy>=2.2.5",
+    "rich>=14.0.0",
+    "tyro>=0.9.20",
+]
+
+[tool.uv.sources]
+lerobot = { git = "https://github.com/huggingface/lerobot" }
+egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
