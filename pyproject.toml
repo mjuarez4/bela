@@ -18,3 +18,7 @@ dependencies = [
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot" }
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
+
+[tool.setuptools]
+packages = ["bela"]
+
