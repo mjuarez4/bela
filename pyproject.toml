@@ -1,3 +1,9 @@
+[build-system]
+requires = ["setuptools", "wheel", "numpy", "cython", "torch"]
+build-backend = "setuptools.build_meta"
+# https://docs.astral.sh/uv/concepts/projects/config/#build-systems
+# https://docs.astral.sh/uv/concepts/projects/config/#build-isolation
+
 [project]
 name = "bela"
 version = "0.1.0"
@@ -8,17 +14,25 @@ dependencies = [
     "egomimic",
     "flax>=0.10.6",
     "huggingface-hub[hf-xet]>=0.31.2",
+    "iopath",
     "jax>=0.6.0",
     "lerobot",
     "numpy>=2.2.5",
+    "pytorch3d",
+    # "pytorch3d",
     "rich>=14.0.0",
+    "torch>=2.6.0",
     "tyro>=0.9.20",
 ]
 
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot" }
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
+iopath = { git = "https://github.com/facebookresearch/iopath" }
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
 
 [tool.setuptools]
 packages = ["bela"]
 
+[tool.uv]
+no-build-isolation-package = ["pytorch3d"]
