@@ -36,3 +36,27 @@ packages = ["bela"]
 
 [tool.uv]
 no-build-isolation-package = ["pytorch3d"]
+
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+  "E",  # pycodestyle
+  "F",  # pyflakes
+  "I",  # isort
+]
+ignore = [
+  "F841",  # assigned but unused variable
+  "F821",  # undefined name
+  "E731",  # do not assign lambda
+  "E722",  # do not use bare except
+  "E402",  # module import not at top of file
+  "E501"  # line too long
+]
+
+
+[tool.ruff.lint.isort]
+# force-single-line = true
+force-sort-within-sections = true
