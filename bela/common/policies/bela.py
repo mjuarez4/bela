@@ -415,8 +415,11 @@ class BELAPolicy(ACTPolicy):
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
 
-    def forward(self, batch: dict[str, Tensor], heads) -> tuple[Tensor, dict]:
+    def forward(self, batch: dict[str, Tensor], heads=None) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
+
+        if heads is None:
+            assert (heads:=batch.get('heads')), "heads must be provided"
 
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
@@ -467,4 +470,4 @@ class BELAPolicy(ACTPolicy):
         else:
             loss = losses["l1"]
 
-        return loss, losses, out
+        return loss, losses # , out

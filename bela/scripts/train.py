@@ -1,5 +1,7 @@
 import logging
-from rich.pretty import pprint as rpprint
+from tqdm import tqdm
+from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
+
 import jax
 import os
 import time
@@ -44,6 +46,7 @@ from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.train import TrainPipelineConfig
 
 from pprint import pformat
+#
 from rich.pretty import pprint
 import logging
 
@@ -115,7 +118,7 @@ def main(cfg: MyTrainConfig):
     Entry point for distributed training - compatible with torchrun
     """
 
-    rpprint(cfg)
+    pprint(cfg)
 
     # Initialize distributed environment (required for torchrun)
     is_distributed, rank, world_size, device = tt.setup_distributed()
@@ -175,16 +178,12 @@ def main(cfg: MyTrainConfig):
                     "image.side": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
                     "image.wrist": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
                     # "pose": PolicyFeature(FeatureType.STATE, (6,)),
-                    # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
+                    "gripper": PolicyFeature(FeatureType.STATE, (1,)),
                 },
                 "human": {
                     # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                    "mano.hand_pose": PolicyFeature(
-                        FeatureType.STATE, (15, 3)
-                    ),  # (15, 3, 3)),
-                    "mano.global_orient": PolicyFeature(
-                        FeatureType.STATE, (3,)
-                    ),  # (3, 3)),
+                    "mano.hand_pose": PolicyFeature( FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
+                    # "mano.global_orient": PolicyFeature( FeatureType.STATE, (3,)),  # (3, 3)),
                     "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
                 },
                 "shared": {
@@ -196,8 +195,9 @@ def main(cfg: MyTrainConfig):
         batchspec = flatten_dict(batchspec, sep=".")
         sharespec = {k: v for k, v in batchspec.items() if k.startswith("observation.shared")}
 
-        def postprocess(batch, h):
-            batch.pop('task') # it is annoying to pprint
+        def postprocess(batch, h, flat=True):
+            if 'task' in batch:
+                batch.pop('task') # it is annoying to pprint
             batch = {k.replace("observation.", f"observation.{h}."): v for k, v in batch.items()}
             batch = {k.replace(".state.", f"."): v for k, v in batch.items()}
 
@@ -210,48 +210,99 @@ def main(cfg: MyTrainConfig):
             newbatch = {}
             for k, v in batch.items():
                 can,key = canshare(k)
-                print(k, key)
+                # print(k, key)
                 if can:
                     newbatch[key] = v
                 else:
                     newbatch[k] = v
             batch = newbatch
 
-            rpprint(spec(batch))
-            batch = {k: v for k, v in batch.items() if k in batchspec}
-
             # create shared features that don't exist
             myfeat = 'observation.shared.cam.pose'
             if h == 'human':
                 kp3d = batch['observation.human.kp3d']
+                bs,t,n, *_ = kp3d.shape
                 palm = kp3d[:,:,0] # b,t,n,3 -> b,t,3
                 kp3d = kp3d[:,:,1:] # should be 20 now
-                batch[myfeat] = 
+                kp3d = kp3d.reshape(bs, t, -1) if flat else kp3d
+                batch['observation.human.kp3d'] = kp3d
 
+                bs, t, *_ = kp3d.shape
+                rot = batch['observation.human.mano.global_orient']
+                rot = matrix_to_rotation_6d(rot.reshape(-1,3,3))
+                rot = rot.reshape(bs, t, -1)
+                batch[myfeat] = torch.cat([palm, rot], dim=-1) 
 
+                # convert mano.hand_pose to rotation_6d
+                manopose = batch['observation.human.mano.hand_pose'] # b,t,m,3,3
+                manopose = matrix_to_rotation_6d(manopose.reshape(-1,3,3))
+                manopose = manopose.reshape(bs, t, -1, manopose.shape[-1])
+                manopose = manopose.reshape(bs, t, -1) if flat else manopose
+                batch['observation.human.mano.hand_pose'] = manopose
+
+            if h == 'robot':
+                pass
+
+            # pprint(spec(batch))
+            batch = {k: v for k, v in batch.items() if k in batchspec}
             # design action
             # everything is a state variable if image is not in the name
             isstate = lambda x: "image" not in x
             actions = {}
             for k, v in batch.items():
                 if isstate(k):
-                    a = batch[k][0]
+                    a = batch[k]
+                    # first one is qpos
+                    q = batch[k][:,0] # b,0 not 0,t
                     actions[k.replace("observation.", f"action.")] = a
+                    actions[k] = q
             batch = batch | actions
 
-            rpprint(spec(batch))
-            quit()
-            # first one is qpos
-            batch["observation.state"] = batch["action"][:, 0]
+            batch["heads"] = [h,"shared"]
             return batch
 
-        example_batch = jax.tree.map(torch.stack, dataset[0], dataset[0])
+        example = dataset[0]
+        example.pop('task') 
 
-        # example = postprocess(dataset[0], h='human')
-        example_batch = postprocess(example_batch, h='human')
-        rpprint(spec(example))
+        example = jax.tree.map(lambda *x:  torch.stack((x)), example,example )
+        example = postprocess(example, h='human')
+        pprint(spec(example))
+        # quit()
+
+        def compute_stats(dataset, h):
+            # Compute statistics for normalization
+            # TODO you will need separate stats for actions even though shared
+            stats = {}
+            data = []
+            samples = list(range(len(dataset)))[:10]
+            for i in tqdm(samples, total=len(samples), desc="Computing stats",  leave=False):
+                d = dataset[i]
+                d.pop('task')
+                d = jax.tree.map(lambda x: x.unsqueeze(0), d)
+                d = postprocess(d, h='human')
+                d.pop('heads')
+                data.append(d)
+            data = jax.tree.map(lambda *x: torch.concatenate((x)), data[0], *data[1:])
+
+            def make_stat(stack):
+                return {
+                    "mean": stack.mean(dim=0),
+                    "std": stack.std(dim=0),
+                    "max": stack.max(dim=0)[0],
+                    "min": stack.min(dim=0)[0],
+                    'count': stack.shape[0],
+                }
+            stats = jax.tree.map(lambda x: make_stat(x), data)
+
+            def take_act(k,v):
+                print(k[0].key)
+                y = k[0].key.startswith("action") and isinstance(v, torch.Tensor)
+                return v[0] if y else v
+            stats = jax.tree.map_with_path(take_act, stats)
+            return stats
+
+        pprint(spec(compute_stats(dataset, h='human')))
         quit()
-
 
         """
         # Create environment used for evaluating checkpoints during training on simulation data.
