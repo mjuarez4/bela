@@ -25,6 +25,11 @@ dependencies = [
     "tyro>=0.9.20",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.2.0",
+]
+
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot" }
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }

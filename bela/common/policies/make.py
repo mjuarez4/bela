@@ -1,33 +1,15 @@
-import math
-from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
-from itertools import chain
-from typing import Callable
 
-import egomimic
-import einops
-import jax
-import numpy as np
-import torch
-import torch.nn.functional as F  # noqa: N812
-import torchvision
-import tyro
 from flax.traverse_util import flatten_dict, unflatten_dict
+import jax
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.policies.act.configuration_act import ACTConfig
-from lerobot.common.policies.act.modeling_act import (
-    ACT, ACTDecoder, ACTEncoder, ACTPolicy, ACTSinusoidalPositionEmbedding2d,
-    create_sinusoidal_pos_embedding)
-from lerobot.common.policies.normalize import Normalize, Unnormalize
-from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
-from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+from lerobot.configs.default import DatasetConfig
+from lerobot.configs.types import FeatureType, PolicyFeature
+import numpy as np
 from rich.pretty import pprint
-from torch import Tensor, nn
-from torchvision.models._utils import IntermediateLayerGetter
-from torchvision.ops.misc import FrozenBatchNorm2d
-from torchvision.transforms.v2 import has_all
+import torch
+import tyro
 
 from bela.typ import Head, HeadSpec, Morph
 
@@ -42,19 +24,17 @@ def spec(d):
 
 @dataclass
 class HybridConfig:
-
-    dataset: DatasetConfig = field(
-        default_factory=lambda: DatasetConfig(repo_id="none")
-    )
+    dataset: DatasetConfig = field(default_factory=lambda: DatasetConfig(repo_id="none"))
     human_repos: list[str] = field(default_factory=list)
     robot_repos: list[str] = field(default_factory=list)
 
     policy: ACTConfig = field(default_factory=ACTConfig)
 
-from bela.common.policies.bela import BELA, BELAPolicy
+
+from bela.common.policies.bela import BELAPolicy
+
 
 def make_policy():
-
     batchspec = {
         "observation": {
             "robot": {
@@ -66,12 +46,8 @@ def make_policy():
             },
             "human": {
                 # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                "mano.hand_pose": PolicyFeature(
-                    FeatureType.STATE, (15, 3)
-                ),  # (15, 3, 3)),
-                "mano.global_orient": PolicyFeature(
-                    FeatureType.STATE, (3,)
-                ),  # (3, 3)),
+                "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
+                "mano.global_orient": PolicyFeature(FeatureType.STATE, (3,)),  # (3, 3)),
                 "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
             },
             "shared": {
@@ -93,23 +69,15 @@ def make_policy():
     input_features = flatten_dict(batchspec, sep=".")
     output_features = dict(input_features)
     output_features = jax.tree.map(
-        lambda x: (
-            PolicyFeature(FeatureType.ACTION, x.shape)
-            if x.type == FeatureType.STATE
-            else None
-        ),
+        lambda x: (PolicyFeature(FeatureType.ACTION, x.shape) if x.type == FeatureType.STATE else None),
         output_features,
     )
     output_features = {k: v for k, v in output_features.items() if v is not None}
-    output_features = {
-        k.replace("observation.", "action."): v for k, v in output_features.items()
-    }
+    output_features = {k.replace("observation.", "action."): v for k, v in output_features.items()}
 
     batchspec = batchspec | unflatten_dict(output_features, sep=".")
 
-    state_features = {
-        k: v for k, v in input_features.items() if v.type == FeatureType.STATE
-    }
+    state_features = {k: v for k, v in input_features.items() if v.type == FeatureType.STATE}
     pprint(batchspec)
 
     def compute_head(feat, head):
@@ -174,8 +142,8 @@ def make_policy():
     policy(example_batch, heads=["robot", "shared"])
     return policy
 
-def main(cfg: HybridConfig):
 
+def main(cfg: HybridConfig):
     hdatasets, rdatasets = [], []
     for h in cfg.human_repos:
         cfg.dataset.repo_id = h

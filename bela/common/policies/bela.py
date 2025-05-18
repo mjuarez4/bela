@@ -1,27 +1,24 @@
-from dataclasses import dataclass, field
-from enum import Enum
-
 import einops
-import torch
-import torch.nn.functional as F  # noqa: N812
-import torchvision
-from flax.traverse_util import flatten_dict, unflatten_dict
-from lerobot.common.datasets.factory import make_dataset
+from flax.traverse_util import flatten_dict
 from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.common.policies.act.modeling_act import (
-    ACT, ACTDecoder, ACTEncoder, ACTPolicy, ACTSinusoidalPositionEmbedding2d,
-    create_sinusoidal_pos_embedding)
+    ACT,
+    ACTDecoder,
+    ACTEncoder,
+    ACTPolicy,
+    ACTSinusoidalPositionEmbedding2d,
+    create_sinusoidal_pos_embedding,
+)
 from lerobot.common.policies.normalize import Normalize, Unnormalize
-from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
-from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
-from rich.pretty import pprint
+import torch
 from torch import Tensor, nn
+import torch.nn.functional as F  # noqa: N812
+import torchvision
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
-from torchvision.transforms.v2 import has_all
 
-from bela.typ import Head, HeadSpec, Morph
+from bela.typ import HeadSpec
+
 
 def recursive_moduledict(d: dict):
     out = {}
@@ -65,9 +62,7 @@ class BELA(ACT):
             # Note: The assumption here is that we are using a ResNet model
             # (and hence layer4 is the final feature map).
             # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(
-                backbone_model, return_layers={"layer4": "feature_map"}
-            )
+            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -95,9 +90,7 @@ class BELA(ACT):
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
 
         if self.config.image_features:
-            self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
-            )
+            self.encoder_img_feat_input_proj = nn.Conv2d(backbone_model.fc.in_features, config.dim_model, kernel_size=1)
 
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
@@ -105,9 +98,7 @@ class BELA(ACT):
         n_1d_tokens += 1  # for the shared state
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
-            self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(
-                config.dim_model // 2
-            )
+            self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(config.dim_model // 2)
 
         # Transformer decoder.
         # Learnable positional embedding for the transformer's decoder (in the style of DETR object queries).
@@ -116,7 +107,6 @@ class BELA(ACT):
         self._reset_parameters()
 
     def build_vae(self, config):
-
         self.vae = {
             "encoder": ACTEncoder(config, is_vae_encoder=True),
             "cls": nn.Embedding(1, config.dim_model),
@@ -142,27 +132,22 @@ class BELA(ACT):
             num_input_token_encoder += 1
         self.register_buffer(
             "vae_encoder_pos_enc",
-            create_sinusoidal_pos_embedding(
-                num_input_token_encoder, config.dim_model
-            ).unsqueeze(0),
+            create_sinusoidal_pos_embedding(num_input_token_encoder, config.dim_model).unsqueeze(0),
         )
 
     def compute_style(self, batch, use, h):
-
         batch_size = batch["observation.images"][0].shape[0]
         if not use:
             # When not using the VAE encoder, we set the latent to be all zeros.
             mu = log_sigma_x2 = None
             # TODO(rcadene, alexander-soare): remove call to `.to` to speedup forward ; precompute and use buffer
-            latent_sample = torch.zeros(
-                [batch_size, self.config.latent_dim], dtype=torch.float32
-            ).to(batch["observation.robot"].device)
+            latent_sample = torch.zeros([batch_size, self.config.latent_dim], dtype=torch.float32).to(
+                batch["observation.robot"].device
+            )
             return latent_sample, mu, log_sigma_x2
 
         # Prepare the input to the VAE encoder: [cls, *joint_space_configuration, *action_sequence].
-        cls_embed = einops.repeat(
-            self.vae["cls"].weight, "1 d -> b 1 d", b=batch_size
-        )  # (B, 1, D)
+        cls_embed = einops.repeat(self.vae["cls"].weight, "1 d -> b 1 d", b=batch_size)  # (B, 1, D)
         robot_state_embed = self.vae["proj"][h]["state"](batch[f"observation.{h}"])
         robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
         action_embed = self.vae["proj"][h]["action"](batch[f"action.{h}"])  # (B, S, D)
@@ -186,9 +171,7 @@ class BELA(ACT):
             False,
             device=batch[f"observation.{h}"].device,
         )
-        key_padding_mask = torch.cat(
-            [cls_joint_is_pad, batch["action_is_pad"]], axis=1
-        )  # (bs, seq+1 or 2)
+        key_padding_mask = torch.cat([cls_joint_is_pad, batch["action_is_pad"]], axis=1)  # (bs, seq+1 or 2)
 
         # Forward pass through VAE encoder to get the latent PDF parameters.
         # select the class token, with shape (B, D)
@@ -252,9 +235,7 @@ class BELA(ACT):
 
         # Prepare transformer encoder inputs.
         encoder_in_tok = [self.encoder_latent_input_proj(latent_sample)]
-        encoder_in_pos_embed = list(
-            self.encoder_1d_feature_pos_embed.weight.unsqueeze(1)
-        )
+        encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
 
         # Robot state token.
         for h in heads:
@@ -270,9 +251,7 @@ class BELA(ACT):
             # For a list of images, the H and W may vary but H*W is constant.
             for img in batch["observation.images"]:
                 cam_features = self.backbone(img)["feature_map"]
-                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(
-                    dtype=cam_features.dtype
-                )
+                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
 
                 # Rearrange features to (sequence, batch, dim).
@@ -356,22 +335,14 @@ class BELAPolicy(ACTPolicy):
         self.config = config
         self.headspec = headspec
 
-        self.normalize_inputs = Normalize(
-            config.input_features, config.normalization_mapping, dataset_stats
-        )
-        self.normalize_targets = Normalize(
-            config.output_features, config.normalization_mapping, dataset_stats
-        )
-        self.unnormalize_outputs = Unnormalize(
-            config.output_features, config.normalization_mapping, dataset_stats
-        )
+        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
+        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
+        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
 
         self.model = BELA(config, headspec)
 
         if config.temporal_ensemble_coeff is not None:
-            self.temporal_ensembler = ACTTemporalEnsembler(
-                config.temporal_ensemble_coeff, config.chunk_size
-            )
+            self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
         self.reset()
 
@@ -387,12 +358,8 @@ class BELAPolicy(ACTPolicy):
 
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
-            batch = dict(
-                batch
-            )  # shallow copy so that adding a key doesn't modify the original
-            batch["observation.images"] = [
-                batch[key] for key in self.config.image_features
-            ]
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
         # If we are doing temporal ensembling, do online updates where we keep track of the number of actions
         # we are ensembling over.
@@ -419,15 +386,13 @@ class BELAPolicy(ACTPolicy):
         """Run the batch through the model and compute the loss for training or validation."""
 
         if heads is None:
-            assert (heads:=batch.get('heads')), "heads must be provided"
+            assert (heads := batch.get("heads")), "heads must be provided"
 
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             # shallow copy so that adding a key doesn't modify the original
             batch = dict(batch)
-            batch["observation.images"] = [
-                batch[key] for key in self.config.image_features
-            ]
+            batch["observation.images"] = [batch[key] for key in self.config.image_features]
         batch = self.normalize_targets(batch)
 
         for h in heads:
@@ -446,10 +411,7 @@ class BELAPolicy(ACTPolicy):
         losses = {}
         for k, ahv in ah.items():
             if any([h in k for h in heads]):
-                losses[k] = (
-                    F.l1_loss(batch[k], ahv, reduction="none")
-                    * ~batch["action_is_pad"].unsqueeze(-1)
-                ).mean()
+                losses[k] = (F.l1_loss(batch[k], ahv, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)).mean()
 
         losses["l1"] = torch.Tensor(list(losses.values())).mean()
         if self.config.use_vae:
@@ -457,17 +419,10 @@ class BELAPolicy(ACTPolicy):
             # each dimension independently, we sum over the latent dimension to get the total
             # KL-divergence per batch element, then take the mean over the batch.
             # (See App. B of https://arxiv.org/abs/1312.6114 for more details).
-            mean_kld = (
-                (
-                    -0.5
-                    * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())
-                )
-                .sum(-1)
-                .mean()
-            )
+            mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
             losses["kld"] = mean_kld.item()
             loss = losses["l1"] + mean_kld * self.config.kl_weight
         else:
             loss = losses["l1"]
 
-        return loss, losses # , out
+        return loss, losses  # , out

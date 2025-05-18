@@ -1,62 +1,43 @@
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field
 import logging
-from tqdm import tqdm
-from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
+from pprint import pformat
+import time
 
 import jax
-import os
-import time
-from contextlib import nullcontext
-from typing import Any
-
-import torch
-import torch.distributed as dist
-from torch.amp import GradScaler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import Optimizer
-from torch.utils.data.distributed import DistributedSampler
-
-from lerobot.common.datasets.factory import make_dataset
+from lerobot.common import envs
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
-from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
-from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.utils import get_device_from_parameters
+from lerobot.common.optim.optimizers import AdamConfig, AdamWConfig
+from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
-from lerobot.common.utils.train_utils import (get_step_checkpoint_dir,
-                                              get_step_identifier,
-                                              save_checkpoint,
-                                              update_last_checkpoint)
-from lerobot.common.utils.utils import (format_big_number,
-                                        get_safe_torch_device, has_method,
-                                        init_logging)
+from lerobot.common.utils.train_utils import (
+    get_step_checkpoint_dir,
+    get_step_identifier,
+    save_checkpoint,
+    update_last_checkpoint,
+)
+from lerobot.common.utils.utils import format_big_number, get_safe_torch_device, init_logging
 from lerobot.common.utils.wandb_utils import WandBLogger
-from lerobot.configs import parser
+from lerobot.configs.default import DatasetConfig, WandBConfig
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.eval import eval_policy
+from pytorch3d.transforms import matrix_to_rotation_6d
 
-
-from lerobot.common.utils.wandb_utils import WandBLogger
-import train_tools as tt
-
-from dataclasses import dataclass, field, asdict
-from lerobot.common.policies.act.configuration_act import ACTConfig
-from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
-from lerobot.configs.train import TrainPipelineConfig
-
-from pprint import pformat
 #
 from rich.pretty import pprint
-import logging
-
+import torch
+from torch.amp import GradScaler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
+import train_tools as tt
 import tyro
 
-from lerobot.common.optim.optimizers import AdamWConfig, AdamConfig
-from lerobot.common import envs
-
 import bela
-from bela.common.policies.bela import BELAPolicy
 
 if True:
     from bela.common.policies.make import make_policy
@@ -64,34 +45,30 @@ else:
     from lerobot.common.policies.factory import make_policy
 
 
-from flax.traverse_util import flatten_dict, unflatten_dict
-from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+from flax.traverse_util import flatten_dict
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.types import FeatureType, PolicyFeature
+
 
 @PreTrainedConfig.register_subclass("bela")
 @dataclass
 class BELAConfig(ACTConfig):
-
     @property
     def observation_delta_indices(self):
-        # we do dynamic composition of action. 
+        # we do dynamic composition of action.
         # since the prediction is future states
         return self.action_delta_indices
 
     @property
     def image_delta_indices(self):
-        # only one image to save space 
+        # only one image to save space
         return [0]
-
 
 
 @dataclass
 class MyTrainConfig(TrainPipelineConfig):
-
-    dataset: DatasetConfig = field(
-        default_factory=lambda: DatasetConfig(repo_id="none")
-    )
-    human_repos: list[str] = field(default_factory=list) 
+    dataset: DatasetConfig = field(default_factory=lambda: DatasetConfig(repo_id="none"))
+    human_repos: list[str] = field(default_factory=list)
     human_revisions: list[str] = field(default_factory=list)  # branch
     robot_repos: list[str] = field(default_factory=list)
     robot_revisions: list[str] = field(default_factory=list)  # branch
@@ -109,9 +86,8 @@ class MyTrainConfig(TrainPipelineConfig):
 
 
 def spec(thing):
-    return jax.tree.map(
-        lambda x: x.shape if isinstance(x, torch.Tensor) else type(x), thing
-    )
+    return jax.tree.map(lambda x: x.shape if isinstance(x, torch.Tensor) else type(x), thing)
+
 
 def main(cfg: MyTrainConfig):
     """
@@ -155,13 +131,9 @@ def main(cfg: MyTrainConfig):
 
         if rank == 0:
             logging.info("Creating dataset")
-        dataset = bela.common.dataset.make_dataset(cfg) # dataset = make_dataset(cfg)
-
+        dataset = bela.common.dataset.make_dataset(cfg)  # dataset = make_dataset(cfg)
 
         # monkeypatch to build the action at runtime
-
-        from functools import partial
-        from typing import Callable
 
         def compose_action(x, key):
             joints = torch.stack(x["observation.state.joints"])
@@ -182,7 +154,7 @@ def main(cfg: MyTrainConfig):
                 },
                 "human": {
                     # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                    "mano.hand_pose": PolicyFeature( FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
+                    "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
                     # "mano.global_orient": PolicyFeature( FeatureType.STATE, (3,)),  # (3, 3)),
                     "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
                 },
@@ -196,10 +168,10 @@ def main(cfg: MyTrainConfig):
         sharespec = {k: v for k, v in batchspec.items() if k.startswith("observation.shared")}
 
         def postprocess(batch, h, flat=True):
-            if 'task' in batch:
-                batch.pop('task') # it is annoying to pprint
+            if "task" in batch:
+                batch.pop("task")  # it is annoying to pprint
             batch = {k.replace("observation.", f"observation.{h}."): v for k, v in batch.items()}
-            batch = {k.replace(".state.", f"."): v for k, v in batch.items()}
+            batch = {k.replace(".state.", "."): v for k, v in batch.items()}
 
             # move shared features
             # if the key would be in sharespec, if named properly, then rename
@@ -209,7 +181,7 @@ def main(cfg: MyTrainConfig):
 
             newbatch = {}
             for k, v in batch.items():
-                can,key = canshare(k)
+                can, key = canshare(k)
                 # print(k, key)
                 if can:
                     newbatch[key] = v
@@ -218,29 +190,29 @@ def main(cfg: MyTrainConfig):
             batch = newbatch
 
             # create shared features that don't exist
-            myfeat = 'observation.shared.cam.pose'
-            if h == 'human':
-                kp3d = batch['observation.human.kp3d']
-                bs,t,n, *_ = kp3d.shape
-                palm = kp3d[:,:,0] # b,t,n,3 -> b,t,3
-                kp3d = kp3d[:,:,1:] # should be 20 now
+            myfeat = "observation.shared.cam.pose"
+            if h == "human":
+                kp3d = batch["observation.human.kp3d"]
+                bs, t, n, *_ = kp3d.shape
+                palm = kp3d[:, :, 0]  # b,t,n,3 -> b,t,3
+                kp3d = kp3d[:, :, 1:]  # should be 20 now
                 kp3d = kp3d.reshape(bs, t, -1) if flat else kp3d
-                batch['observation.human.kp3d'] = kp3d
+                batch["observation.human.kp3d"] = kp3d
 
                 bs, t, *_ = kp3d.shape
-                rot = batch['observation.human.mano.global_orient']
-                rot = matrix_to_rotation_6d(rot.reshape(-1,3,3))
+                rot = batch["observation.human.mano.global_orient"]
+                rot = matrix_to_rotation_6d(rot.reshape(-1, 3, 3))
                 rot = rot.reshape(bs, t, -1)
-                batch[myfeat] = torch.cat([palm, rot], dim=-1) 
+                batch[myfeat] = torch.cat([palm, rot], dim=-1)
 
                 # convert mano.hand_pose to rotation_6d
-                manopose = batch['observation.human.mano.hand_pose'] # b,t,m,3,3
-                manopose = matrix_to_rotation_6d(manopose.reshape(-1,3,3))
+                manopose = batch["observation.human.mano.hand_pose"]  # b,t,m,3,3
+                manopose = matrix_to_rotation_6d(manopose.reshape(-1, 3, 3))
                 manopose = manopose.reshape(bs, t, -1, manopose.shape[-1])
                 manopose = manopose.reshape(bs, t, -1) if flat else manopose
-                batch['observation.human.mano.hand_pose'] = manopose
+                batch["observation.human.mano.hand_pose"] = manopose
 
-            if h == 'robot':
+            if h == "robot":
                 pass
 
             # pprint(spec(batch))
@@ -253,19 +225,19 @@ def main(cfg: MyTrainConfig):
                 if isstate(k):
                     a = batch[k]
                     # first one is qpos
-                    q = batch[k][:,0] # b,0 not 0,t
-                    actions[k.replace("observation.", f"action.")] = a
+                    q = batch[k][:, 0]  # b,0 not 0,t
+                    actions[k.replace("observation.", "action.")] = a
                     actions[k] = q
             batch = batch | actions
 
-            batch["heads"] = [h,"shared"]
+            batch["heads"] = [h, "shared"]
             return batch
 
         example = dataset[0]
-        example.pop('task') 
+        example.pop("task")
 
-        example = jax.tree.map(lambda *x:  torch.stack((x)), example,example )
-        example = postprocess(example, h='human')
+        example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
+        example = postprocess(example, h="human")
         pprint(spec(example))
         # quit()
 
@@ -275,12 +247,12 @@ def main(cfg: MyTrainConfig):
             stats = {}
             data = []
             samples = list(range(len(dataset)))[:10]
-            for i in tqdm(samples, total=len(samples), desc="Computing stats",  leave=False):
+            for i in tqdm(samples, total=len(samples), desc="Computing stats", leave=False):
                 d = dataset[i]
-                d.pop('task')
+                d.pop("task")
                 d = jax.tree.map(lambda x: x.unsqueeze(0), d)
-                d = postprocess(d, h='human')
-                d.pop('heads')
+                d = postprocess(d, h="human")
+                d.pop("heads")
                 data.append(d)
             data = jax.tree.map(lambda *x: torch.concatenate((x)), data[0], *data[1:])
 
@@ -290,18 +262,20 @@ def main(cfg: MyTrainConfig):
                     "std": stack.std(dim=0),
                     "max": stack.max(dim=0)[0],
                     "min": stack.min(dim=0)[0],
-                    'count': stack.shape[0],
+                    "count": stack.shape[0],
                 }
+
             stats = jax.tree.map(lambda x: make_stat(x), data)
 
-            def take_act(k,v):
+            def take_act(k, v):
                 print(k[0].key)
                 y = k[0].key.startswith("action") and isinstance(v, torch.Tensor)
                 return v[0] if y else v
+
             stats = jax.tree.map_with_path(take_act, stats)
             return stats
 
-        pprint(spec(compute_stats(dataset, h='human')))
+        pprint(spec(compute_stats(dataset, h="human")))
         quit()
 
         """
@@ -378,22 +352,16 @@ def main(cfg: MyTrainConfig):
                     lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
 
         if rank == 0:
-            num_learnable_params = sum(
-                p.numel() for p in policy.parameters() if p.requires_grad
-            )
+            num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
             num_total_params = sum(p.numel() for p in policy.parameters())
 
             logging.info(f"Output dir: {cfg.output_dir}")
             if cfg.env is not None:
                 logging.info(f"{cfg.env.task=}")
             logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-            logging.info(
-                f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})"
-            )
+            logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
             logging.info(f"{dataset.num_episodes=}")
-            logging.info(
-                f"{num_learnable_params=} ({format_big_number(num_learnable_params)})"
-            )
+            logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
             logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
             logging.info(f"Distributed training on {world_size} GPUs")
 
@@ -490,7 +458,7 @@ def main(cfg: MyTrainConfig):
 
             start_time = time.perf_counter()
             batch = next(dl_iter)
-            batch = postprocess(batch, h='human')
+            batch = postprocess(batch, h="human")
 
             is_leaf = lambda x: isinstance(x, torch.Tensor) or isinstance(x, list)
             # pprint(spec(batch))
@@ -555,9 +523,7 @@ def main(cfg: MyTrainConfig):
                     # Create a new tracker to hold the aggregated metrics
                     agg_metrics = {}
                     for key in train_metrics:
-                        agg_metrics[key] = AverageMeter(
-                            train_metrics[key].name, train_metrics[key].fmt
-                        )
+                        agg_metrics[key] = AverageMeter(train_metrics[key].name, train_metrics[key].fmt)
                         if key in global_metrics:
                             agg_metrics[key].avg = global_metrics[key]
 
@@ -571,15 +537,13 @@ def main(cfg: MyTrainConfig):
 
                     # Log comprehensive throughput information
                     gpu_info = f"{world_size} GPU{'s' if world_size > 1 else ''}"
-                    throughput = f"Throughput: {samples_per_second:.1f} samples/sec ({batches_per_second:.1f} batches/sec)"
+                    throughput = (
+                        f"Throughput: {samples_per_second:.1f} samples/sec ({batches_per_second:.1f} batches/sec)"
+                    )
                     time_info = f"Time: {interval_time:.2f}s for {global_steps} steps"
-                    batch_info = (
-                        f"Batch size: {batch_size}/GPU, {batch_size * world_size} total"
-                    )
+                    batch_info = f"Batch size: {batch_size}/GPU, {batch_size * world_size} total"
 
-                    logging.info(
-                        f"[{gpu_info} | {throughput} | {time_info} | {batch_info}] {agg_tracker}"
-                    )
+                    logging.info(f"[{gpu_info} | {throughput} | {time_info} | {batch_info}] {agg_tracker}")
 
                     if wandb_logger:
                         wandb_log_dict = global_metrics
@@ -603,14 +567,10 @@ def main(cfg: MyTrainConfig):
             # Only the main process handles checkpoint saving
             if rank == 0 and cfg.save_checkpoint and is_saving_step:
                 logging.info(f"Checkpoint policy after step {step}")
-                checkpoint_dir = get_step_checkpoint_dir(
-                    cfg.output_dir, cfg.steps, step
-                )
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 # Unwrap the policy if using DDP
                 save_policy = policy.module if is_distributed else policy
-                save_checkpoint(
-                    checkpoint_dir, step, cfg, save_policy, optimizer, lr_scheduler
-                )
+                save_checkpoint(checkpoint_dir, step, cfg, save_policy, optimizer, lr_scheduler)
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
@@ -622,11 +582,7 @@ def main(cfg: MyTrainConfig):
                 eval_start_time = time.time()
                 with (
                     torch.no_grad(),
-                    (
-                        torch.autocast(device_type=device.type)
-                        if cfg.policy.use_amp
-                        else nullcontext()
-                    ),
+                    torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
                 ):
                     # Unwrap the policy if using DDP
                     eval_policy_model = policy.module if is_distributed else policy
@@ -653,18 +609,14 @@ def main(cfg: MyTrainConfig):
                     initial_step=step,
                 )
                 eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
-                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop(
-                    "avg_sum_reward"
-                )
+                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
                 eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
                 logging.info(f"[Eval time: {eval_time:.2f}s] {eval_tracker}")
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_log_dict["eval_time"] = eval_time
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(
-                        eval_info["video_paths"][0], step, mode="eval"
-                    )
+                    wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
 
         # Cleanup
         if eval_env:

@@ -1,16 +1,9 @@
+from contextlib import nullcontext
 import logging
 import os
-import time
-from contextlib import nullcontext
 from pprint import pformat
+import time
 from typing import Any
-
-import torch
-import torch.distributed as dist
-from torch.amp import GradScaler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import Optimizer
-from torch.utils.data.distributed import DistributedSampler
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
@@ -22,17 +15,22 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import get_device_from_parameters
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
-from lerobot.common.utils.train_utils import (get_step_checkpoint_dir,
-                                              get_step_identifier,
-                                              save_checkpoint,
-                                              update_last_checkpoint)
-from lerobot.common.utils.utils import (format_big_number,
-                                        get_safe_torch_device, has_method,
-                                        init_logging)
+from lerobot.common.utils.train_utils import (
+    get_step_checkpoint_dir,
+    get_step_identifier,
+    save_checkpoint,
+    update_last_checkpoint,
+)
+from lerobot.common.utils.utils import format_big_number, get_safe_torch_device, has_method, init_logging
 from lerobot.common.utils.wandb_utils import WandBLogger
-from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.eval import eval_policy
+import torch
+from torch.amp import GradScaler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import Optimizer
+from torch.utils.data.distributed import DistributedSampler
 
 
 def update_policy(
@@ -100,9 +98,7 @@ def setup_distributed():
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
 
-    logging.info(
-        f"Initializing process group: rank={rank}, world_size={world_size}, local_rank={local_rank}"
-    )
+    logging.info(f"Initializing process group: rank={rank}, world_size={world_size}, local_rank={local_rank}")
 
     # Set device
     if torch.cuda.is_available():
@@ -115,9 +111,7 @@ def setup_distributed():
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
 
-    logging.info(
-        f"Process group initialized: rank={dist.get_rank()}, world_size={dist.get_world_size()}"
-    )
+    logging.info(f"Process group initialized: rank={dist.get_rank()}, world_size={dist.get_world_size()}")
     return True, rank, world_size, device
 
 
@@ -155,9 +149,7 @@ def gather_rewards(rewards, device):
 
     # Pad rewards tensor to max_size
     if rewards.shape[0] < max_size:
-        padding = torch.zeros(
-            max_size - rewards.shape[0], *rewards.shape[1:], device=device
-        )
+        padding = torch.zeros(max_size - rewards.shape[0], *rewards.shape[1:], device=device)
         rewards = torch.cat([rewards, padding], dim=0)
 
     # Gather all rewards
@@ -178,16 +170,12 @@ def create_distributed_envs(env_cfg, world_size, rank):
     Each process gets its own set of environments
     """
     # Set different seeds for each process's environments
-    env_seed = (
-        env_cfg.seed if hasattr(env_cfg, "seed") and env_cfg.seed is not None else 0
-    ) + rank * 1000
+    env_seed = (env_cfg.seed if hasattr(env_cfg, "seed") and env_cfg.seed is not None else 0) + rank * 1000
 
     # Create environments for this process
     env = make_env(
         env_cfg,
-        n_envs=(
-            env_cfg.n_envs_per_process if hasattr(env_cfg, "n_envs_per_process") else 1
-        ),
+        n_envs=(env_cfg.n_envs_per_process if hasattr(env_cfg, "n_envs_per_process") else 1),
         start_seed=env_seed,
     )
 
@@ -195,7 +183,7 @@ def create_distributed_envs(env_cfg, world_size, rank):
 
 
 def main(cfg: TrainPipelineConfig):
-    """ Entry point for distributed training - compatible with torchrun """
+    """Entry point for distributed training - compatible with torchrun"""
 
     # Initialize distributed environment (required for torchrun)
     is_distributed, rank, world_size, device = setup_distributed()
@@ -236,9 +224,6 @@ def main(cfg: TrainPipelineConfig):
 
         # monkeypatch to build the action at runtime
 
-        from functools import partial
-        from typing import Callable
-
         def compose_action(x, key):
             joints = torch.stack(x["observation.state.joints"])
             gripper = torch.stack(x["observation.state.gripper"]).unsqueeze(-1)
@@ -271,8 +256,6 @@ def main(cfg: TrainPipelineConfig):
             ds_meta=dataset.meta,
         )
         policy = policy.to(device)
-
-
 
         # Important: Create optimizer BEFORE wrapping model in DDP
         # This ensures get_optim_params() works correctly
@@ -332,22 +315,16 @@ def main(cfg: TrainPipelineConfig):
                     lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
 
         if rank == 0:
-            num_learnable_params = sum(
-                p.numel() for p in policy.parameters() if p.requires_grad
-            )
+            num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
             num_total_params = sum(p.numel() for p in policy.parameters())
 
             logging.info(f"Output dir: {cfg.output_dir}")
             if cfg.env is not None:
                 logging.info(f"{cfg.env.task=}")
             logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-            logging.info(
-                f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})"
-            )
+            logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
             logging.info(f"{dataset.num_episodes=}")
-            logging.info(
-                f"{num_learnable_params=} ({format_big_number(num_learnable_params)})"
-            )
+            logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
             logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
             logging.info(f"Distributed training on {world_size} GPUs")
 
@@ -446,7 +423,6 @@ def main(cfg: TrainPipelineConfig):
             batch = posprocess(batch)
 
             import jax
-            from rich.pretty import pprint
 
             is_leaf = lambda x: isinstance(x, torch.Tensor) or isinstance(x, list)
             spec = lambda arr: jax.tree.map(
@@ -516,9 +492,7 @@ def main(cfg: TrainPipelineConfig):
                     # Create a new tracker to hold the aggregated metrics
                     agg_metrics = {}
                     for key in train_metrics:
-                        agg_metrics[key] = AverageMeter(
-                            train_metrics[key].name, train_metrics[key].fmt
-                        )
+                        agg_metrics[key] = AverageMeter(train_metrics[key].name, train_metrics[key].fmt)
                         if key in global_metrics:
                             agg_metrics[key].avg = global_metrics[key]
 
@@ -532,15 +506,13 @@ def main(cfg: TrainPipelineConfig):
 
                     # Log comprehensive throughput information
                     gpu_info = f"{world_size} GPU{'s' if world_size > 1 else ''}"
-                    throughput = f"Throughput: {samples_per_second:.1f} samples/sec ({batches_per_second:.1f} batches/sec)"
+                    throughput = (
+                        f"Throughput: {samples_per_second:.1f} samples/sec ({batches_per_second:.1f} batches/sec)"
+                    )
                     time_info = f"Time: {interval_time:.2f}s for {global_steps} steps"
-                    batch_info = (
-                        f"Batch size: {batch_size}/GPU, {batch_size * world_size} total"
-                    )
+                    batch_info = f"Batch size: {batch_size}/GPU, {batch_size * world_size} total"
 
-                    logging.info(
-                        f"[{gpu_info} | {throughput} | {time_info} | {batch_info}] {agg_tracker}"
-                    )
+                    logging.info(f"[{gpu_info} | {throughput} | {time_info} | {batch_info}] {agg_tracker}")
 
                     if wandb_logger:
                         wandb_log_dict = global_metrics
@@ -564,14 +536,10 @@ def main(cfg: TrainPipelineConfig):
             # Only the main process handles checkpoint saving
             if rank == 0 and cfg.save_checkpoint and is_saving_step:
                 logging.info(f"Checkpoint policy after step {step}")
-                checkpoint_dir = get_step_checkpoint_dir(
-                    cfg.output_dir, cfg.steps, step
-                )
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 # Unwrap the policy if using DDP
                 save_policy = policy.module if is_distributed else policy
-                save_checkpoint(
-                    checkpoint_dir, step, cfg, save_policy, optimizer, lr_scheduler
-                )
+                save_checkpoint(checkpoint_dir, step, cfg, save_policy, optimizer, lr_scheduler)
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
@@ -583,11 +551,7 @@ def main(cfg: TrainPipelineConfig):
                 eval_start_time = time.time()
                 with (
                     torch.no_grad(),
-                    (
-                        torch.autocast(device_type=device.type)
-                        if cfg.policy.use_amp
-                        else nullcontext()
-                    ),
+                    torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
                 ):
                     # Unwrap the policy if using DDP
                     eval_policy_model = policy.module if is_distributed else policy
@@ -614,18 +578,14 @@ def main(cfg: TrainPipelineConfig):
                     initial_step=step,
                 )
                 eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
-                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop(
-                    "avg_sum_reward"
-                )
+                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
                 eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
                 logging.info(f"[Eval time: {eval_time:.2f}s] {eval_tracker}")
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_log_dict["eval_time"] = eval_time
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(
-                        eval_info["video_paths"][0], step, mode="eval"
-                    )
+                    wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
 
         # Cleanup
         if eval_env:
