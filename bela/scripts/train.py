@@ -4,6 +4,7 @@ import logging
 from pprint import pformat
 import time
 
+from flax.traverse_util import flatten_dict
 import jax
 from lerobot.common import envs
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
@@ -22,9 +23,10 @@ from lerobot.common.utils.train_utils import (
 from lerobot.common.utils.utils import format_big_number, get_safe_torch_device, init_logging
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs.default import DatasetConfig, WandBConfig
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.scripts.eval import eval_policy
-from pytorch3d.transforms import matrix_to_rotation_6d
 
 #
 from rich.pretty import pprint
@@ -33,21 +35,17 @@ from torch.amp import GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm
 import train_tools as tt
 import tyro
 
 import bela
+from bela.common.datasets.util import DataStats, postprocess
+from bela.util import spec
 
 if True:
     from bela.common.policies.make import make_policy
 else:
     from lerobot.common.policies.factory import make_policy
-
-
-from flax.traverse_util import flatten_dict
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import FeatureType, PolicyFeature
 
 
 @PreTrainedConfig.register_subclass("bela")
@@ -83,10 +81,6 @@ class MyTrainConfig(TrainPipelineConfig):
 
     def to_dict(self):
         return asdict(self)
-
-
-def spec(thing):
-    return jax.tree.map(lambda x: x.shape if isinstance(x, torch.Tensor) else type(x), thing)
 
 
 def main(cfg: MyTrainConfig):
@@ -167,115 +161,21 @@ def main(cfg: MyTrainConfig):
         batchspec = flatten_dict(batchspec, sep=".")
         sharespec = {k: v for k, v in batchspec.items() if k.startswith("observation.shared")}
 
-        def postprocess(batch, h, flat=True):
-            if "task" in batch:
-                batch.pop("task")  # it is annoying to pprint
-            batch = {k.replace("observation.", f"observation.{h}."): v for k, v in batch.items()}
-            batch = {k.replace(".state.", "."): v for k, v in batch.items()}
-
-            # move shared features
-            # if the key would be in sharespec, if named properly, then rename
-            def canshare(k):
-                sharekey = k.replace(f"observation.{h}.", "observation.shared.")
-                return sharekey in sharespec, sharekey
-
-            newbatch = {}
-            for k, v in batch.items():
-                can, key = canshare(k)
-                # print(k, key)
-                if can:
-                    newbatch[key] = v
-                else:
-                    newbatch[k] = v
-            batch = newbatch
-
-            # create shared features that don't exist
-            myfeat = "observation.shared.cam.pose"
-            if h == "human":
-                kp3d = batch["observation.human.kp3d"]
-                bs, t, n, *_ = kp3d.shape
-                palm = kp3d[:, :, 0]  # b,t,n,3 -> b,t,3
-                kp3d = kp3d[:, :, 1:]  # should be 20 now
-                kp3d = kp3d.reshape(bs, t, -1) if flat else kp3d
-                batch["observation.human.kp3d"] = kp3d
-
-                bs, t, *_ = kp3d.shape
-                rot = batch["observation.human.mano.global_orient"]
-                rot = matrix_to_rotation_6d(rot.reshape(-1, 3, 3))
-                rot = rot.reshape(bs, t, -1)
-                batch[myfeat] = torch.cat([palm, rot], dim=-1)
-
-                # convert mano.hand_pose to rotation_6d
-                manopose = batch["observation.human.mano.hand_pose"]  # b,t,m,3,3
-                manopose = matrix_to_rotation_6d(manopose.reshape(-1, 3, 3))
-                manopose = manopose.reshape(bs, t, -1, manopose.shape[-1])
-                manopose = manopose.reshape(bs, t, -1) if flat else manopose
-                batch["observation.human.mano.hand_pose"] = manopose
-
-            if h == "robot":
-                pass
-
-            # pprint(spec(batch))
-            batch = {k: v for k, v in batch.items() if k in batchspec}
-            # design action
-            # everything is a state variable if image is not in the name
-            isstate = lambda x: "image" not in x
-            actions = {}
-            for k, v in batch.items():
-                if isstate(k):
-                    a = batch[k]
-                    # first one is qpos
-                    q = batch[k][:, 0]  # b,0 not 0,t
-                    actions[k.replace("observation.", "action.")] = a
-                    actions[k] = q
-            batch = batch | actions
-
-            batch["heads"] = [h, "shared"]
-            return batch
-
         example = dataset[0]
         example.pop("task")
 
         example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
-        example = postprocess(example, h="human")
+        example = postprocess(example, batchspec, h="human")
         pprint(spec(example))
         # quit()
 
-        def compute_stats(dataset, h):
-            # Compute statistics for normalization
-            # TODO you will need separate stats for actions even though shared
-            stats = {}
-            data = []
-            samples = list(range(len(dataset)))[:10]
-            for i in tqdm(samples, total=len(samples), desc="Computing stats", leave=False):
-                d = dataset[i]
-                d.pop("task")
-                d = jax.tree.map(lambda x: x.unsqueeze(0), d)
-                d = postprocess(d, h="human")
-                d.pop("heads")
-                data.append(d)
-            data = jax.tree.map(lambda *x: torch.concatenate((x)), data[0], *data[1:])
+        stats = DataStats(bela.ROOT / "stats{h}.pt")
+        stats.compute(dataset, batchspec, h="human")
 
-            def make_stat(stack):
-                return {
-                    "mean": stack.mean(dim=0),
-                    "std": stack.std(dim=0),
-                    "max": stack.max(dim=0)[0],
-                    "min": stack.min(dim=0)[0],
-                    "count": stack.shape[0],
-                }
-
-            stats = jax.tree.map(lambda x: make_stat(x), data)
-
-            def take_act(k, v):
-                print(k[0].key)
-                y = k[0].key.startswith("action") and isinstance(v, torch.Tensor)
-                return v[0] if y else v
-
-            stats = jax.tree.map_with_path(take_act, stats)
-            return stats
-
-        pprint(spec(compute_stats(dataset, h="human")))
+        pprint(spec(stats.stats))
+        pprint(type(stats.stats))
+        print("done")
+        # pprint(spec(compute_stats(dataset, batchspec h="human")))
         quit()
 
         """
