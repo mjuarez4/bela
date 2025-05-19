@@ -3,13 +3,13 @@
 * I prefer very concise docstrings. and concise code. the purpose of the code
   should be clear from reading its contents
 
-if its a dataclass, then 
-@dataclass class Myclass: 
-""" Myclass is a dataclass that represents a simple example. """ 
-    name: str # it is better to describe the argument here 
+if its a dataclass, then
+@dataclass class Myclass:
+""" Myclass is a dataclass that represents a simple example. """
+    name: str # it is better to describe the argument here
     age: int # and here rather than the docstring
 
-* I prefer OOP paterns for different components. 
+* I prefer OOP paterns for different components.
 * wrapper/decorator can sometimes be a good choice
 * I also like using a config.create(*args, **kwargs) to create components from
   config objects
@@ -31,4 +31,3 @@ if its a dataclass, then
   test and maintain. Break down long functions into smaller, single-purpose
   functions to adhere to the Single Responsibility Principle. cyclomatic complexity (CC) should be no more than 8, but 4-5 is better.
 * Duplicated Code. keep it dry
-
