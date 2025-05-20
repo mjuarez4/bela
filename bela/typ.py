@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from lerobot.configs.types import FeatureType
+from lerobot.configs.types import PolicyFeature as _PolicyFeature
 import numpy as np
 
 
@@ -26,6 +28,16 @@ class Head:
             ).reshape(-1)
             return Head(None, arr.shape)
         raise TypeError(f"Unsupported type for addition: {type(other)}")
+
+
+@dataclass
+class PolicyFeature(_PolicyFeature):
+    type: FeatureType
+    shape: tuple
+
+    def flatten(self):
+        arr = np.zeros(self.shape).reshape(-1)
+        return PolicyFeature(self.type, arr.shape)
 
 
 @dataclass

@@ -5,21 +5,13 @@ import jax
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.configs.default import DatasetConfig
-from lerobot.configs.types import FeatureType, PolicyFeature
-import numpy as np
+from lerobot.configs.types import FeatureType
 from rich.pretty import pprint
 import torch
 import tyro
 
-from bela.typ import Head, HeadSpec, Morph
-
-
-def typespec(d):
-    return jax.tree.map(lambda x: type(x), d)
-
-
-def spec(d):
-    return jax.tree.map(lambda x: x.shape, d)
+from bela.common.policies.bela import BELAPolicy
+from bela.typ import Head, HeadSpec, Morph, PolicyFeature
 
 
 @dataclass
@@ -31,39 +23,8 @@ class HybridConfig:
     policy: ACTConfig = field(default_factory=ACTConfig)
 
 
-from bela.common.policies.bela import BELAPolicy
-
-
-def make_policy():
-    batchspec = {
-        "observation": {
-            "robot": {
-                "joints": PolicyFeature(FeatureType.STATE, (7,)),
-                "image.side": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
-                "image.wrist": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
-                # "pose": PolicyFeature(FeatureType.STATE, (6,)),
-                # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-            },
-            "human": {
-                # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
-                "mano.global_orient": PolicyFeature(FeatureType.STATE, (3,)),  # (3, 3)),
-                "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
-            },
-            "shared": {
-                "image.low": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
-                "cam.pose": PolicyFeature(FeatureType.STATE, (6,)),
-            },
-        },
-    }
-
-    def flatten_state_feat(x):
-        if x.type == FeatureType.STATE:
-            arr = np.zeros(x.shape).reshape(-1)
-            return PolicyFeature(FeatureType.STATE, arr.shape)
-        return x
-
-    batchspec = jax.tree.map(flatten_state_feat, batchspec)
+def make_policy(batchspec: dict[str, PolicyFeature]):
+    batchspec = jax.tree.map(lambda x: x.flatten() if x.type == FeatureType.STATE else x, batchspec)
 
     # pprint(batchspec)
     input_features = flatten_dict(batchspec, sep=".")
@@ -95,35 +56,19 @@ def make_policy():
     bs = 4
     chunk = 50
 
-    def generate_example(x):
-        shape = list(x.shape)
-        if x.type == FeatureType.STATE:
-            return np.zeros(([bs] + shape))
-        if x.type == FeatureType.VISUAL:
-            return np.zeros(([bs] + shape))
-        if x.type == FeatureType.ACTION:
-            return np.zeros(([bs, chunk] + shape))
+    from bela.common.policies.dummy import generate_feat
 
-    def generate_stats(x):
-        return {
-            "count": np.array(55),
-            "max": np.random.random(x.shape),
-            "min": np.random.random(x.shape),
-            "mean": np.random.random(x.shape),
-            "std": np.random.random(x.shape),
-        }
-
-    example_batch = jax.tree.map(generate_example, batchspec)
+    example_batch = jax.tree.map(generate_feat, batchspec)
     example_batch = jax.tree.map(torch.Tensor, example_batch)
     example_batch = flatten_dict(example_batch, sep=".")
 
     example_batch["action_is_pad"] = torch.zeros((bs, chunk)).bool()
 
-    example_stats = jax.tree.map(generate_stats, batchspec)
-    example_stats = jax.tree.map(torch.Tensor, example_stats)
-    is_leaf = lambda d, k: "count" in k
-    example_stats = flatten_dict(example_stats, sep=".", is_leaf=is_leaf)
-    pprint(spec(example_stats))
+    # example_stats = jax.tree.map(generate_stats, batchspec)
+    # example_stats = jax.tree.map(torch.Tensor, example_stats)
+    # is_leaf = lambda d, k: "count" in k
+    # example_stats = flatten_dict(example_stats, sep=".", is_leaf=is_leaf)
+    # pprint(spec(example_stats))
 
     policycfg = ACTConfig(
         input_features=input_features,
@@ -131,7 +76,6 @@ def make_policy():
         chunk_size=chunk,
         n_action_steps=chunk,
     )
-    pprint(policycfg)
     policy = BELAPolicy(
         config=policycfg,
         headspec=headspec,
@@ -143,7 +87,8 @@ def make_policy():
     return policy
 
 
-def main(cfg: HybridConfig):
+def test_fwd_bwd(cfg: HybridConfig):
+    policy = make_policy()
     hdatasets, rdatasets = [], []
     for h in cfg.human_repos:
         cfg.dataset.repo_id = h
@@ -154,6 +99,10 @@ def main(cfg: HybridConfig):
 
     print(hdatasets)
     print(rdatasets)
+
+
+def main(cfg: HybridConfig):
+    test_fwd_bwd(cfg)
 
 
 if __name__ == "__main__":
