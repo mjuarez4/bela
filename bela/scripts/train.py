@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import logging
 from pprint import pformat
@@ -35,11 +36,11 @@ from torch.amp import GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-import train_tools as tt
 import tyro
 
 import bela
 from bela.common.datasets.util import DataStats, postprocess
+import bela.train_tools as tt
 from bela.util import spec
 
 if True:
@@ -125,17 +126,17 @@ def main(cfg: MyTrainConfig):
 
         if rank == 0:
             logging.info("Creating dataset")
-        dataset = bela.common.dataset.make_dataset(cfg)  # dataset = make_dataset(cfg)
 
-        # monkeypatch to build the action at runtime
+        datasets = {}
+        for head in (heads := ["human", "robot"]):
+            _cfg = deepcopy(cfg)
+            _cfg.dataset.repo_id = cfg.human_repos[0] if head == "human" else cfg.robot_repos[0]
+            _cfg.dataset.revision = cfg.human_revisions[0] if head == "human" else cfg.robot_revisions[0]
 
-        def compose_action(x, key):
-            joints = torch.stack(x["observation.state.joints"])
-            gripper = torch.stack(x["observation.state.gripper"]).unsqueeze(-1)
-            action = torch.cat([joints, gripper], dim=-1)
-            return [a for a in action]  # return to list for compliance
+            dataset = bela.common.dataset.make_dataset(_cfg)
+            datasets[head] = dataset
 
-        # dataset.qfns = { "action": compose_action }
+        # dataset = bela.common.dataset.make_dataset(cfg)  # dataset = make_dataset(cfg)
 
         batchspec = {
             "observation": {
@@ -161,22 +162,20 @@ def main(cfg: MyTrainConfig):
         batchspec = flatten_dict(batchspec, sep=".")
         sharespec = {k: v for k, v in batchspec.items() if k.startswith("observation.shared")}
 
-        example = dataset[0]
-        example.pop("task")
+        for head in heads:
+            example = datasets[head][0]
+            example.pop("task")
 
-        example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
-        example = postprocess(example, batchspec, h="human")
-        pprint(spec(example))
-        # quit()
+            example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
+            example = postprocess(example, batchspec, head=head)
+            pprint(spec(example))
 
-        stats = DataStats(bela.ROOT / "stats{h}.pt")
-        stats.compute(dataset, batchspec, h="human")
+        stats = {head: DataStats(head=head) for head in heads}
+        for head, stat in stats.items():
+            stat.maybe_compute(datasets[head], batchspec)
+            pprint(spec(stat.stats))
 
-        pprint(spec(stats.stats))
-        pprint(type(stats.stats))
-        print("done")
-        # pprint(spec(compute_stats(dataset, batchspec h="human")))
-        quit()
+        assert "action_is_pad" in example, f"missing key=action_is_pad in {_head:=heads[-1]}"
 
         """
         # Create environment used for evaluating checkpoints during training on simulation data.
