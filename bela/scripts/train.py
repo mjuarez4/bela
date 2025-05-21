@@ -21,12 +21,16 @@ from lerobot.common.utils.train_utils import (
     save_checkpoint,
     update_last_checkpoint,
 )
-from lerobot.common.utils.utils import format_big_number, get_safe_torch_device, init_logging
+from lerobot.common.utils.utils import (
+    format_big_number,
+    get_safe_torch_device,
+    init_logging,
+)
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs.default import DatasetConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.configs.types import FeatureType
 from lerobot.scripts.eval import eval_policy
 
 #
@@ -41,6 +45,7 @@ import tyro
 import bela
 from bela.common.datasets.util import DataStats, postprocess
 import bela.train_tools as tt
+from bela.typ import PolicyFeature
 from bela.util import spec
 
 if True:
@@ -138,7 +143,7 @@ def main(cfg: MyTrainConfig):
 
         # dataset = bela.common.dataset.make_dataset(cfg)  # dataset = make_dataset(cfg)
 
-        batchspec = {
+        _batchspec = {
             "observation": {
                 "robot": {
                     "joints": PolicyFeature(FeatureType.STATE, (7,)),
@@ -159,20 +164,25 @@ def main(cfg: MyTrainConfig):
                 },
             },
         }
-        batchspec = flatten_dict(batchspec, sep=".")
-        sharespec = {k: v for k, v in batchspec.items() if k.startswith("observation.shared")}
+        _batchspec = flatten_dict(_batchspec, sep=".")
+        sharespec = {k: v for k, v in _batchspec.items() if k.startswith("observation.shared")}
 
+        examples = {}
         for head in heads:
             example = datasets[head][0]
             example.pop("task")
 
             example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
-            example = postprocess(example, batchspec, head=head)
+            example = postprocess(example, _batchspec, head=head)
+            examples[head] = example
             pprint(spec(example))
+
+        # from rich.pretty import pprint
 
         stats = {head: DataStats(head=head) for head in heads}
         for head, stat in stats.items():
-            stat.maybe_compute(datasets[head], batchspec)
+            stat.maybe_compute(datasets[head], _batchspec)
+            # pprint(find_torch_unstable(stat.stats))
             pprint(spec(stat.stats))
 
         assert "action_is_pad" in example, f"missing key=action_is_pad in {_head:=heads[-1]}"
@@ -189,8 +199,26 @@ def main(cfg: MyTrainConfig):
         if rank == 0:
             logging.info("Creating policy")
 
+        #
+        # update batchspec to reflect the postprocessed dataset
+        #
+        newbatchspec = flatten_dict(stats["human"].stats | stats["robot"].stats, sep=".")
+        newbatchspec = {_k.replace(".mean", ""): v for _k, v in newbatchspec.items() if "mean" in _k}
+
+        def shape_to_policyfeat(path, t: torch.Tensor):
+            """for jax.tree.map_with_path"""
+            shape = t.shape
+            path = ".".join([str(x.key) for x in path])
+            if "action" in path:
+                return PolicyFeature(FeatureType.ACTION, shape)
+            if "image" in path:
+                return PolicyFeature(FeatureType.VISUAL, shape)
+            return PolicyFeature(FeatureType.STATE, shape)
+
+        batchspec = jax.tree.map_with_path(shape_to_policyfeat, newbatchspec)
+
         # policy = make_policy( cfg=cfg.policy, ds_meta=dataset.meta)
-        policy = make_policy()
+        policy = make_policy(batchspec, stats, examples)
         policy = policy.to(device)
 
         # Important: Create optimizer BEFORE wrapping model in DDP
@@ -357,7 +385,7 @@ def main(cfg: MyTrainConfig):
 
             start_time = time.perf_counter()
             batch = next(dl_iter)
-            batch = postprocess(batch, h="human")
+            batch = postprocess(batch, batchspec, head=head)
 
             is_leaf = lambda x: isinstance(x, torch.Tensor) or isinstance(x, list)
             # pprint(spec(batch))
