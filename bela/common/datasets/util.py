@@ -7,6 +7,7 @@ import torch
 from tqdm import tqdm
 
 import bela
+from bela.util import resize_to_480x640
 
 
 @dataclass
@@ -55,6 +56,16 @@ def maybe_squeeze_image(path, mim):
     if mim.ndim == 5:
         return mim.squeeze(1)
     raise ValueError(f"Image is not 4d: {path} {mim.shape}")
+
+
+def maybe_resize_robot_image(path, img):
+    """Resize robot images from 224×224 to 480×640."""
+    path = join_jaxpath(path)
+    if "observation.robot" not in path or "image" not in path:
+        return img
+    if img.shape[-2:] == (224, 224):
+        return resize_to_480x640(img)
+    return img
 
 
 def postprocess(batch, batchspec, head, flat=True):
@@ -121,6 +132,7 @@ def postprocess(batch, batchspec, head, flat=True):
     # everything is a state variable if image is not in the name
 
     batch = jax.tree.map_with_path(maybe_squeeze_image, batch)
+    batch = jax.tree.map_with_path(maybe_resize_robot_image, batch)
 
     isstate = lambda x: "image" not in x and "action" not in x
     actions = {}
