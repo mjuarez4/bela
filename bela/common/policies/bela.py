@@ -239,8 +239,6 @@ class BELA(ACT):
 
         # Robot state token.
         for h in heads:
-            # pprint(batch[f"observation.{h}"].shape)
-            # pprint(self.proj["in"][h].weight.shape)
             encoder_in_tok.append(self.proj["in"][h](batch[f"observation.{h}"]))
 
         # Camera observation features and positional embeddings.
@@ -321,7 +319,7 @@ class BELAPolicy(ACTPolicy):
         self,
         config: ACTConfig,
         headspec: dict,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        dataset_stats: dict[str, dict[str, Tensor]] | None,
     ):
         """
         Args:
@@ -335,9 +333,26 @@ class BELAPolicy(ACTPolicy):
         self.config = config
         self.headspec = headspec
 
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
-        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
+        self.norms = {}
+        for head, _stat in dataset_stats.items():
+            print(head)
+            in_feat, out_feat = config.input_features, config.output_features
+            norm, stat = config.normalization_mapping, _stat.stats
+
+            # <robot/human> norm can only norm for <robot/human> batch
+            in_feat = {k: v for k, v in in_feat.items() if k in _stat.stats}
+            out_feat = {k: v for k, v in out_feat.items() if k in _stat.stats}
+
+            self.norms[head] = {
+                "in": Normalize(in_feat, norm, stat),
+                "out": Normalize(out_feat, norm, stat),
+                "unnorm": Unnormalize(out_feat, norm, stat),
+            }
+        self.norms = recursive_moduledict(self.norms)
+
+        # self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
+        # self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
+        # self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
 
         self.model = BELA(config, headspec)
 
@@ -345,6 +360,24 @@ class BELAPolicy(ACTPolicy):
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
         self.reset()
+
+    def normalize_inputs(self, batch: dict[str, Tensor], head) -> dict[str, Tensor]:
+        """Normalize the inputs to the model using the dataset statistics."""
+        assert head in ["robot", "human"]
+        batch = self.norms[head]["in"](batch)
+        return batch
+
+    def normalize_targets(self, batch: dict[str, Tensor], head) -> dict[str, Tensor]:
+        """Normalize the targets using the dataset statistics."""
+        assert head in ["robot", "human"]
+        batch = self.norms[head]["out"](batch)
+        return batch
+
+    def unnormalize_outputs(self, batch: dict[str, Tensor], head) -> dict[str, Tensor]:
+        """Unnormalize the outputs using the dataset statistics."""
+        assert head in ["robot", "human"]
+        batch = self.norms[head]["unnorm"](batch)
+        return batch
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -387,13 +420,15 @@ class BELAPolicy(ACTPolicy):
 
         if heads is None:
             assert (heads := batch.get("heads")), "heads must be provided"
+        basehead = [h for h in heads if h != "shared"][0]
 
-        batch = self.normalize_inputs(batch)
+        batch = self.normalize_inputs(batch, basehead)
         if self.config.image_features:
             # shallow copy so that adding a key doesn't modify the original
             batch = dict(batch)
-            batch["observation.images"] = [batch[key] for key in self.config.image_features]
-        batch = self.normalize_targets(batch)
+            imgs = [batch.get(key, None) for key in self.config.image_features]
+            batch["observation.images"] = [x for x in imgs if x is not None]
+        batch = self.normalize_targets(batch, basehead)
 
         for h in heads:
             key = f"action.{h}"

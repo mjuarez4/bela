@@ -1,13 +1,10 @@
 from dataclasses import dataclass, field
 
-from flax.traverse_util import flatten_dict, unflatten_dict
-import jax
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.configs.default import DatasetConfig
 from lerobot.configs.types import FeatureType
 from rich.pretty import pprint
-import torch
 import tyro
 
 from bela.common.policies.bela import BELAPolicy
@@ -23,23 +20,15 @@ class HybridConfig:
     policy: ACTConfig = field(default_factory=ACTConfig)
 
 
-def make_policy(batchspec: dict[str, PolicyFeature]):
-    batchspec = jax.tree.map(lambda x: x.flatten() if x.type == FeatureType.STATE else x, batchspec)
-
+def make_policy(batchspec: dict[str, PolicyFeature], stats, examples):
+    # batchspec = jax.tree.map(lambda x: x.flatten() if x.type == FeatureType.STATE else x, batchspec)
     # pprint(batchspec)
-    input_features = flatten_dict(batchspec, sep=".")
-    output_features = dict(input_features)
-    output_features = jax.tree.map(
-        lambda x: (PolicyFeature(FeatureType.ACTION, x.shape) if x.type == FeatureType.STATE else None),
-        output_features,
-    )
-    output_features = {k: v for k, v in output_features.items() if v is not None}
-    output_features = {k.replace("observation.", "action."): v for k, v in output_features.items()}
-
-    batchspec = batchspec | unflatten_dict(output_features, sep=".")
-
+    input_features = {k: v for k, v in batchspec.items() if "observation" in k}
+    output_features = {k: v for k, v in batchspec.items() if "action" in k}
     state_features = {k: v for k, v in input_features.items() if v.type == FeatureType.STATE}
-    pprint(batchspec)
+
+    # batchspec = batchspec | unflatten_dict(output_features, sep=".")
+    # pprint(batchspec)
 
     def compute_head(feat, head):
         headfeat = {k: v for k, v in feat if head in k}
@@ -53,12 +42,11 @@ def make_policy(batchspec: dict[str, PolicyFeature]):
     )
     pprint(headspec)
 
-    bs = 4
-    chunk = 50
+    bs, chunk = 4, 50
 
-    from bela.common.policies.dummy import generate_feat
-
-    example_batch = jax.tree.map(generate_feat, batchspec)
+    """
+    _generate_feat = partial(generate_feat, batch_size=bs, chunk=chunk)
+    example_batch = jax.tree.map(_generate_feat, batchspec)
     example_batch = jax.tree.map(torch.Tensor, example_batch)
     example_batch = flatten_dict(example_batch, sep=".")
 
@@ -69,6 +57,7 @@ def make_policy(batchspec: dict[str, PolicyFeature]):
     # is_leaf = lambda d, k: "count" in k
     # example_stats = flatten_dict(example_stats, sep=".", is_leaf=is_leaf)
     # pprint(spec(example_stats))
+    """
 
     policycfg = ACTConfig(
         input_features=input_features,
@@ -79,11 +68,15 @@ def make_policy(batchspec: dict[str, PolicyFeature]):
     policy = BELAPolicy(
         config=policycfg,
         headspec=headspec,
-        dataset_stats=example_stats,
+        dataset_stats=stats,
     )
 
-    policy(example_batch, heads=["human", "shared"])
-    policy(example_batch, heads=["robot", "shared"])
+    for head, ex in examples.items():
+        print(f"fwd {head}")
+        policy(ex, heads=[head, "shared"])
+
+    # policy(example_batch, heads=["human", "shared"])
+    # policy(example_batch, heads=["robot", "shared"])
     return policy
 
 
