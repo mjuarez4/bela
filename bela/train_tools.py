@@ -108,6 +108,46 @@ def update_policy(
     return train_metrics, out_dict
 
 
+def update_policy_multi(
+    train_metrics: MetricsTracker,
+    policy: PreTrainedPolicy,
+    batches: dict[str, Any],
+    optimizer: Optimizer,
+    grad_clip_norm: float,
+    grad_scaler: GradScaler,
+    lr_scheduler=None,
+    use_amp: bool = False,
+    lock=None,
+) -> tuple[MetricsTracker, dict]:
+    """Backpropagate using the mean loss from multiple batches."""
+    start = time.perf_counter()
+
+    losses, out_dict = [], {}
+    for head, batch in batches.items():
+        loss, out = _compute_loss(policy, batch, use_amp)
+        losses.append(loss)
+        out_dict[head] = out
+
+    loss = torch.stack(losses).mean()
+
+    grad_scaler.scale(loss).backward()
+    grad_scaler.unscale_(optimizer)
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        policy.parameters(), grad_clip_norm, error_if_nonfinite=False
+    )
+    _step_optimizer(optimizer, grad_scaler, lock)
+    if lr_scheduler is not None:
+        lr_scheduler.step()
+    if has_method(policy, "update"):
+        policy.update()
+
+    train_metrics.loss = loss.item()
+    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.lr = optimizer.param_groups[0]["lr"]
+    train_metrics.update_s = time.perf_counter() - start
+    return train_metrics, out_dict
+
+
 # ---- metrics ----------------------------------------------------------------
 
 

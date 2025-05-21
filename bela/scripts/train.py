@@ -282,68 +282,71 @@ def main(cfg: MyTrainConfig):
             num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
             num_total_params = sum(p.numel() for p in policy.parameters())
 
+            dataset_ref = datasets[heads[0]]
             logging.info(f"Output dir: {cfg.output_dir}")
             if cfg.env is not None:
                 logging.info(f"{cfg.env.task=}")
             logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-            logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
-            logging.info(f"{dataset.num_episodes=}")
+            logging.info(f"{dataset_ref.num_frames=} ({format_big_number(dataset_ref.num_frames)})")
+            logging.info(f"{dataset_ref.num_episodes=}")
             logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
             logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
             logging.info(f"Distributed training on {world_size} GPUs")
 
-        # Create distributed sampler to ensure different data on each GPU
-        if is_distributed:
-            if hasattr(cfg.policy, "drop_n_last_frames"):
-                episodic_sampler = EpisodeAwareSampler(
-                    dataset.episode_data_index,
-                    drop_n_last_frames=cfg.policy.drop_n_last_frames,
-                    shuffle=True,
-                )
-                # Wrap the episodic sampler with DistributedSampler
-                sampler = DistributedSampler(
-                    episodic_sampler,
-                    num_replicas=world_size,
-                    rank=rank,
-                    shuffle=True,
-                    seed=cfg.seed if cfg.seed is not None else 0,
-                )
-            else:
-                sampler = DistributedSampler(
-                    dataset,
-                    num_replicas=world_size,
-                    rank=rank,
-                    shuffle=True,
-                    seed=cfg.seed if cfg.seed is not None else 0,
-                )
-            shuffle = False
-        else:
-            # For non-distributed case, use the original sampler logic
-            if hasattr(cfg.policy, "drop_n_last_frames"):
-                shuffle = False
-                sampler = EpisodeAwareSampler(
-                    dataset.episode_data_index,
-                    drop_n_last_frames=cfg.policy.drop_n_last_frames,
-                    shuffle=True,
-                )
-            else:
-                shuffle = True
-                sampler = None
-
-        # Calculate per-GPU batch size
+        # Build a dataloader per dataset
+        dl_iters, samplers = {}, {}
         batch_size = cfg.batch_size // world_size if is_distributed else cfg.batch_size
+        for head in heads:
+            dataset = datasets[head]
+            if is_distributed:
+                if hasattr(cfg.policy, "drop_n_last_frames"):
+                    episodic_sampler = EpisodeAwareSampler(
+                        dataset.episode_data_index,
+                        drop_n_last_frames=cfg.policy.drop_n_last_frames,
+                        shuffle=True,
+                    )
+                    sampler = DistributedSampler(
+                        episodic_sampler,
+                        num_replicas=world_size,
+                        rank=rank,
+                        shuffle=True,
+                        seed=cfg.seed if cfg.seed is not None else 0,
+                    )
+                else:
+                    sampler = DistributedSampler(
+                        dataset,
+                        num_replicas=world_size,
+                        rank=rank,
+                        shuffle=True,
+                        seed=cfg.seed if cfg.seed is not None else 0,
+                    )
+                shuffle = False
+            else:
+                if hasattr(cfg.policy, "drop_n_last_frames"):
+                    shuffle = False
+                    sampler = EpisodeAwareSampler(
+                        dataset.episode_data_index,
+                        drop_n_last_frames=cfg.policy.drop_n_last_frames,
+                        shuffle=True,
+                    )
+                else:
+                    shuffle = True
+                    sampler = None
 
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            num_workers=cfg.num_workers,
-            prefetch_factor=2,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            sampler=sampler,
-            pin_memory=device.type != "cpu",
-            drop_last=False,
-        )
-        dl_iter = cycle(dataloader)
+            samplers[head] = sampler
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                num_workers=cfg.num_workers,
+                prefetch_factor=2,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                sampler=sampler,
+                pin_memory=device.type != "cpu",
+                drop_last=False,
+            )
+            dl_iters[head] = cycle(dataloader)
+
+        dataset_ref = datasets[heads[0]]
 
         policy.train()
 
@@ -357,8 +360,8 @@ def main(cfg: MyTrainConfig):
 
         train_tracker = MetricsTracker(
             batch_size,
-            dataset.num_frames,
-            dataset.num_episodes,
+            dataset_ref.num_frames,
+            dataset_ref.num_episodes,
             train_metrics,
             initial_step=step,
         )
@@ -379,27 +382,28 @@ def main(cfg: MyTrainConfig):
             if is_distributed:
                 dist.barrier()
 
-            # Set epoch for the sampler to ensure proper shuffling
             if is_distributed:
-                sampler.set_epoch(step)
+                for sampler in samplers.values():
+                    sampler.set_epoch(step)
 
             start_time = time.perf_counter()
-            batch = next(dl_iter)
-            batch = postprocess(batch, batchspec, head=head)
-
-            is_leaf = lambda x: isinstance(x, torch.Tensor) or isinstance(x, list)
-            # pprint(spec(batch))
+            batches = {}
+            for head in heads:
+                batch = next(dl_iters[head])
+                batch = postprocess(batch, batchspec, head=head)
+                batches[head] = batch
 
             train_tracker.dataloading_s = time.perf_counter() - start_time
 
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(device, non_blocking=True)
+            for batch in batches.values():
+                for key in batch:
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(device, non_blocking=True)
 
-            train_tracker, output_dict = tt.update_policy(
+            train_tracker, output_dict = tt.update_policy_multi(
                 train_tracker,
                 policy,
-                batch,
+                batches,
                 optimizer,
                 cfg.optimizer.grad_clip_norm,
                 grad_scaler=grad_scaler,
@@ -456,8 +460,8 @@ def main(cfg: MyTrainConfig):
 
                     agg_tracker = MetricsTracker(
                         batch_size,
-                        dataset.num_frames,
-                        dataset.num_episodes,
+                        dataset_ref.num_frames,
+                        dataset_ref.num_episodes,
                         agg_metrics,
                         initial_step=step,
                     )
@@ -530,8 +534,8 @@ def main(cfg: MyTrainConfig):
                 }
                 eval_tracker = MetricsTracker(
                     cfg.batch_size,
-                    dataset.num_frames,
-                    dataset.num_episodes,
+                    dataset_ref.num_frames,
+                    dataset_ref.num_episodes,
                     eval_metrics,
                     initial_step=step,
                 )
