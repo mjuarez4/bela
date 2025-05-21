@@ -39,6 +39,25 @@ class DataStats:
         return self.stats
 
 
+def join_jaxpath(path):
+    return ".".join([str(x.key) for x in path])
+
+
+def maybe_squeeze_image(path, mim):
+    """some images are accidentally 4d, so we need to squeeze them
+    this means the batch might be 5d
+    """
+    path = join_jaxpath(path)
+    if "image" not in path:
+        return mim
+
+    if mim.ndim == 4:
+        return mim
+    if mim.ndim == 5:
+        return mim.squeeze(1)
+    raise ValueError(f"Image is not 4d: {path} {mim.shape}")
+
+
 def postprocess(batch, batchspec, head, flat=True):
     if "task" in batch:
         batch.pop("task")  # it is annoying to pprint
@@ -91,6 +110,7 @@ def postprocess(batch, batchspec, head, flat=True):
     if head == "robot":
         bs, t, *_ = batch["observation.robot.joints"].shape
 
+        batch["observation.robot.gripper"] = batch["observation.robot.gripper"].reshape(bs, t, -1)
         logging.warning("cam.pose is not implemented")
         # zeros bs,t,9
         batch["observation.shared.cam.pose"] = torch.zeros((bs, t, 9), device=batch["observation.robot.joints"].device)
@@ -101,7 +121,10 @@ def postprocess(batch, batchspec, head, flat=True):
 
     # design action
     # everything is a state variable if image is not in the name
-    isstate = lambda x: "image" not in x
+
+    batch = jax.tree.map_with_path(maybe_squeeze_image, batch)
+
+    isstate = lambda x: "image" not in x and "action" not in x
     actions = {}
     for k, v in batch.items():
         if isstate(k):
