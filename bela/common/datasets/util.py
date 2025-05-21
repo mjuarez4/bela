@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-import logging
 from pathlib import Path
 
 import jax
@@ -111,7 +110,6 @@ def postprocess(batch, batchspec, head, flat=True):
         bs, t, *_ = batch["observation.robot.joints"].shape
 
         batch["observation.robot.gripper"] = batch["observation.robot.gripper"].reshape(bs, t, -1)
-        logging.warning("cam.pose is not implemented")
         # zeros bs,t,9
         batch["observation.shared.cam.pose"] = torch.zeros((bs, t, 9), device=batch["observation.robot.joints"].device)
         # all the actions will have the same pad
