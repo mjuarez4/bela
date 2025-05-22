@@ -2,12 +2,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import jax
+import numpy as np
 from pytorch3d.transforms import matrix_to_rotation_6d
 import torch
 from tqdm import tqdm
+from xgym import BASE
+from xgym.calibrate.urdf.robot import RobotTree
 
 import bela
 from bela.util import resize_to_480x640
+
+_ROBOT_TREE = RobotTree()
+cam2base = torch.Tensor(np.load(str(BASE / "base.npz"))["base"])
 
 
 @dataclass
@@ -68,6 +74,27 @@ def maybe_resize_robot_image(path, img):
     return img
 
 
+def matx_to_9d(mat: torch.Tensor) -> torch.Tensor:
+    assert mat.shape[-2:] == (4, 4), "Input must end in (4, 4)"
+
+    translation = mat[..., :3, 3]
+    rotation = mat[..., :3, :3]
+    rot6d = matrix_to_rotation_6d(rotation)
+    return torch.cat([translation, rot6d], dim=-1)
+
+
+def compute_robot_campose(batch):
+    bs, t, *_ = batch["observation.robot.joints"].shape
+    kin = _ROBOT_TREE.set_pose(batch["observation.robot.joints"].reshape(-1, 7))  # , end_only=True)
+    kin = jax.tree.map(lambda x: x.get_matrix(), kin)
+    kin = jax.tree.map(lambda x: x.reshape((bs, t, *x.shape[1:])), kin)
+
+    kin = jax.tree.map(lambda x: cam2base @ x, kin)  # now in camera space
+    kin = jax.tree.map(lambda x: matx_to_9d(x), kin)
+
+    return kin["link_eef"]  # b,t,9
+
+
 def postprocess(batch, batchspec, head, flat=True):
     if "task" in batch:
         batch.pop("task")  # it is annoying to pprint
@@ -122,7 +149,7 @@ def postprocess(batch, batchspec, head, flat=True):
 
         batch["observation.robot.gripper"] = batch["observation.robot.gripper"].reshape(bs, t, -1)
         # zeros bs,t,9
-        batch["observation.shared.cam.pose"] = torch.zeros((bs, t, 9), device=batch["observation.robot.joints"].device)
+        batch["observation.shared.cam.pose"] = compute_robot_campose(batch)
         # all the actions will have the same pad
         batch["action_is_pad"] = batch["observation.robot.joints_is_pad"]
 
