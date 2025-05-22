@@ -23,6 +23,7 @@ dependencies = [
     "rich>=14.0.0",
     "torch>=2.6.0",
     "tyro>=0.9.20",
+    "xgym",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,7 @@ lerobot = { git = "https://github.com/huggingface/lerobot" }
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
 iopath = { git = "https://github.com/facebookresearch/iopath" }
 pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+xgym = { path = "../xgym", editable = true }
 
 [tool.setuptools]
 packages = ["bela"]
