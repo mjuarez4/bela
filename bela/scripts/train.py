@@ -177,8 +177,6 @@ def main(cfg: MyTrainConfig):
             examples[head] = example
             pprint(spec(example))
 
-        # from rich.pretty import pprint
-
         stats = {head: DataStats(head=head) for head in heads}
         for head, stat in stats.items():
             stat.maybe_compute(datasets[head], _batchspec)
@@ -337,7 +335,7 @@ def main(cfg: MyTrainConfig):
             dataloader = torch.utils.data.DataLoader(
                 dataset,
                 num_workers=cfg.num_workers,
-                prefetch_factor=2,
+                prefetch_factor=4,
                 batch_size=batch_size,
                 shuffle=shuffle,
                 sampler=sampler,
