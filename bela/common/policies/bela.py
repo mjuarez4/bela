@@ -455,9 +455,10 @@ class BELAPolicy(ACTPolicy):
             # KL-divergence per batch element, then take the mean over the batch.
             # (See App. B of https://arxiv.org/abs/1312.6114 for more details).
             mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
-            losses["kld"] = mean_kld.item()
+            losses["kld"] = mean_kld  # .item()
             loss = losses["l1"] + mean_kld * self.config.kl_weight
         else:
             loss = losses["l1"]
 
+        losses = {k: v.item() for k, v in losses.items()}
         return loss, losses  # , out
