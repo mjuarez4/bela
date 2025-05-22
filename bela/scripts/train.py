@@ -5,7 +5,7 @@ import logging
 from pprint import pformat
 import time
 
-from flax.traverse_util import flatten_dict
+from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 from lerobot.common import envs
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
@@ -89,6 +89,24 @@ class MyTrainConfig(TrainPipelineConfig):
         return asdict(self)
 
 
+def prepare_log_dict(d: dict[str, float]):
+    """Prepare a log dict for wandb."""
+
+    d = {k.replace(".", "/"): v for k, v in flatten_dict(d, sep="/")}
+
+    from rich.pretty import pprint
+
+    pprint(unflatten_dict(d, sep="/"))
+
+    def _detach(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().item()
+        return x
+
+    d = jax.tree.map(_detach, d)
+    return d
+
+
 def main(cfg: MyTrainConfig):
     """
     Entry point for distributed training - compatible with torchrun
@@ -133,7 +151,7 @@ def main(cfg: MyTrainConfig):
             logging.info("Creating dataset")
 
         datasets = {}
-        for head in (heads := ["human", "robot"]):
+        for head in (heads := ["robot", "human"]):
             _cfg = deepcopy(cfg)
             _cfg.dataset.repo_id = cfg.human_repos[0] if head == "human" else cfg.robot_repos[0]
             _cfg.dataset.revision = cfg.human_revisions[0] if head == "human" else cfg.robot_revisions[0]
@@ -182,6 +200,8 @@ def main(cfg: MyTrainConfig):
             stat.maybe_compute(datasets[head], _batchspec)
             # pprint(find_torch_unstable(stat.stats))
             pprint(spec(stat.stats))
+            pprint({k: v for k, v in stat.stats.items() if "image" not in k})
+        quit()
 
         assert "action_is_pad" in example, f"missing key=action_is_pad in {_head:=heads[-1]}"
 
@@ -485,7 +505,7 @@ def main(cfg: MyTrainConfig):
                         wandb_log_dict["total_batch_size"] = batch_size * world_size
                         if output_dict:
                             wandb_log_dict.update(output_dict)
-                        wandb_logger.log_dict(wandb_log_dict, step)
+                        wandb_logger.log_dict(prepare_log_dict(wandb_log_dict), step)
 
                 train_tracker.reset_averages()
 
