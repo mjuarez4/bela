@@ -415,7 +415,7 @@ class BELAPolicy(ACTPolicy):
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
 
-    def forward(self, batch: dict[str, Tensor], heads=None) -> tuple[Tensor, dict]:
+    def _forward(self, batch: dict[str, Tensor], heads=None) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
 
         if heads is None:
@@ -461,4 +461,14 @@ class BELAPolicy(ACTPolicy):
             loss = losses["l1"]
 
         losses = {k: v.item() for k, v in losses.items()}
+        losses["loss"] = loss.detach().clone().item()
         return loss, losses  # , out
+
+    def forward(self, batches: list[dict[str, Tensor]]) -> tuple[Tensor, dict]:
+        losses, infos = [], []
+        for b in batches:
+            loss, info = self._forward(b)
+            losses.append(loss)
+            infos.append(info)
+        loss = torch.stack(losses).mean()
+        return loss, infos

@@ -122,19 +122,26 @@ def update_policy_multi(
     """Backpropagate using the mean loss from multiple batches."""
     start = time.perf_counter()
 
-    losses, out_dict = [], {}
-    for head, batch in batches.items():
-        loss, out = _compute_loss(policy, batch, use_amp)
-        losses.append(loss)
-        out_dict[head] = out
+    # losses, out_dict = [], {}
+    out_dict = {}
+    loss, _infos = _compute_loss(policy, list(batches.values()), use_amp)
 
-    loss = torch.stack(losses).mean()
+    for head, info in zip(batches.keys(), _infos):
+        out_dict[head] = info
 
-    grad_scaler.scale(loss).backward()
+    # for head, batch in batches.items():
+    # loss, out = _compute_loss(policy, batch, use_amp)
+    # losses.append(loss)
+    # out_dict[head] = out
+
+    # loss = torch.stack(losses).mean()
+
+    grad_scaler.scale(loss).backward()  # in favor of retain_graph for ddp
+    # for i, l in enumerate(losses):
+    # grad_scaler.scale(l).backward(retain_graph=(i < len(losses) - 1))
+
     grad_scaler.unscale_(optimizer)
-    grad_norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), grad_clip_norm, error_if_nonfinite=False
-    )
+    grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip_norm, error_if_nonfinite=False)
     _step_optimizer(optimizer, grad_scaler, lock)
     if lr_scheduler is not None:
         lr_scheduler.step()

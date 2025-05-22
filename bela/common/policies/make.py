@@ -5,6 +5,7 @@ from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.configs.default import DatasetConfig
 from lerobot.configs.types import FeatureType
 from rich.pretty import pprint
+import torch
 import tyro
 
 from bela.common.policies.bela import BELAPolicy
@@ -71,9 +72,12 @@ def make_policy(batchspec: dict[str, PolicyFeature], stats, examples):
         dataset_stats=stats,
     )
 
-    for head, ex in examples.items():
-        print(f"fwd {head}")
-        policy(ex, heads=[head, "shared"])
+    policy.eval()
+    with torch.no_grad():  # Disable gradient tracking
+        for head, ex in examples.items():
+            print(f"fwd {head}")
+            policy._forward(ex, heads=[head, "shared"])
+    policy.train()
 
     # policy(example_batch, heads=["human", "shared"])
     # policy(example_batch, heads=["robot", "shared"])
