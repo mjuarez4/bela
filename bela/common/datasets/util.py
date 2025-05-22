@@ -20,6 +20,7 @@ cam2base = torch.Tensor(np.load(str(BASE / "base.npz"))["base"])
 class DataStats:
     head: str
     stats: dict[str, dict[str, torch.Tensor]] = field(default_factory=lambda: {})
+    quick: bool = False  # quick compute stats ?
 
     @property
     def path(self):
@@ -34,7 +35,7 @@ class DataStats:
 
     def compute(self, dataset, batchspec):
         if not self.stats:
-            self.stats = compute_stats(dataset, batchspec, head=self.head)
+            self.stats = compute_stats(dataset, batchspec, head=self.head, quick=self.quick)
             self.save()
 
     def maybe_compute(self, dataset, batchspec):
@@ -176,13 +177,15 @@ def postprocess(batch, batchspec, head, flat=True):
     return batch
 
 
-def compute_stats(dataset, batchspec, head):
+def compute_stats(dataset, batchspec, head, quick=False):
     """Compute statistics for normalization
     you need separate stats for actions even with shared heads
     """
 
     stats, data = {}, []
-    samples = list(range(len(dataset)))[:100]
+    samples = list(range(len(dataset)))
+    samples = samples[:1000] if quick else samples
+
     for i in tqdm(samples, total=len(samples), desc="Computing stats", leave=False):
         d = dataset[i]
         d.pop("task")

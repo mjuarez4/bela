@@ -32,9 +32,9 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.configs.types import FeatureType
 from lerobot.scripts.eval import eval_policy
+from rich.pretty import pprint
 
 #
-from rich.pretty import pprint
 import torch
 from torch.amp import GradScaler
 import torch.distributed as dist
@@ -92,10 +92,7 @@ class MyTrainConfig(TrainPipelineConfig):
 def prepare_log_dict(d: dict[str, float]):
     """Prepare a log dict for wandb."""
 
-    d = {k.replace(".", "/"): v for k, v in flatten_dict(d, sep="/")}
-
-    from rich.pretty import pprint
-
+    d = {k.replace(".", "/"): v for k, v in flatten_dict(d, sep="/").items()}
     pprint(unflatten_dict(d, sep="/"))
 
     def _detach(x):
@@ -201,7 +198,6 @@ def main(cfg: MyTrainConfig):
             # pprint(find_torch_unstable(stat.stats))
             pprint(spec(stat.stats))
             pprint({k: v for k, v in stat.stats.items() if "image" not in k})
-        quit()
 
         assert "action_is_pad" in example, f"missing key=action_is_pad in {_head:=heads[-1]}"
 
