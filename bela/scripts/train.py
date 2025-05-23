@@ -43,7 +43,7 @@ from torch.utils.data.distributed import DistributedSampler
 import tyro
 
 import bela
-from bela.common.datasets.util import DataStats, postprocess
+from bela.common.datasets.util import DataStats, join_jaxpath, postprocess
 import bela.train_tools as tt
 from bela.typ import PolicyFeature
 from bela.util import spec
@@ -147,14 +147,15 @@ def main(cfg: MyTrainConfig):
         if rank == 0:
             logging.info("Creating dataset")
 
-        datasets = {}
-        for head in (heads := ["robot", "human"]):
+        heads = ["robot", "human"]
+        datasets = {h: {} for h in heads}
+        for head in heads:
             _cfg = deepcopy(cfg)
             _cfg.dataset.repo_id = cfg.human_repos[0] if head == "human" else cfg.robot_repos[0]
             _cfg.dataset.revision = cfg.human_revisions[0] if head == "human" else cfg.robot_revisions[0]
 
             dataset = bela.common.dataset.make_dataset(_cfg)
-            datasets[head] = dataset
+            datasets[head][_cfg.dataset.repo_id] = dataset
 
         # dataset = bela.common.dataset.make_dataset(cfg)  # dataset = make_dataset(cfg)
 
@@ -169,9 +170,9 @@ def main(cfg: MyTrainConfig):
                 },
                 "human": {
                     # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                    "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 3)),  # (15, 3, 3)),
+                    "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 9)),  # (15, 3, 3)),
                     # "mano.global_orient": PolicyFeature( FeatureType.STATE, (3,)),  # (3, 3)),
-                    "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
+                    # "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
                 },
                 "shared": {
                     "image.low": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
@@ -182,19 +183,36 @@ def main(cfg: MyTrainConfig):
         _batchspec = flatten_dict(_batchspec, sep=".")
         sharespec = {k: v for k, v in _batchspec.items() if k.startswith("observation.shared")}
 
-        examples = {}
-        for head in heads:
-            example = datasets[head][0]
-            example.pop("task")
+        # validate the dataset and postprocess
+        validate = True
+        if validate:
+            examples = {}
+            for head in heads:
+                ds = datasets[head]  # dict[str,dict[str,dset]]
+                ds = ds[list(ds.keys())[0]]
+                example = ds[0]
+                example.pop("task")
 
-            example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
-            example = postprocess(example, _batchspec, head=head)
-            examples[head] = example
-            pprint(spec(example))
+                example = jax.tree.map(lambda *x: torch.stack((x)), example, example)
+                example = postprocess(example, _batchspec, head=head)
+                examples[head] = example
+                pprint(spec(example))
 
-        stats = {head: DataStats(head=head) for head in heads}
+        def dat2stat(path, dset):
+            head, repo_id = join_jaxpath(path).split(".")
+            return DataStats(head=head, repo_id=repo_id, dataset=dset, quick=True)
+
+        stats = flatten_dict(jax.tree.map_with_path(dat2stat, datasets), sep=".")
+        datasets = {s.head: s.dataset for s in stats.values()}
+
+        assert len(stats) == len(heads), f"expected {len(heads)} stats, got {len(stats)}"
+        stats = {s.head: s for s in stats.values()}
+        pprint(stats)
+
+        # stats = {head: DataStats(head=head ) for head in heads}
+
         for head, stat in stats.items():
-            stat.maybe_compute(datasets[head], _batchspec)
+            stat.maybe_compute(_batchspec)
             # pprint(find_torch_unstable(stat.stats))
             pprint(spec(stat.stats))
             pprint({k: v for k, v in stat.stats.items() if "image" not in k})
@@ -222,7 +240,7 @@ def main(cfg: MyTrainConfig):
         def shape_to_policyfeat(path, t: torch.Tensor):
             """for jax.tree.map_with_path"""
             shape = t.shape
-            path = ".".join([str(x.key) for x in path])
+            path = join_jaxpath(path)
             if "action" in path:
                 return PolicyFeature(FeatureType.ACTION, shape)
             if "image" in path:

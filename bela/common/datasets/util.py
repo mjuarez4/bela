@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 import jax
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 from pytorch3d.transforms import matrix_to_rotation_6d
 import torch
@@ -15,16 +15,27 @@ from bela.util import resize_to_480x640
 _ROBOT_TREE = RobotTree()
 cam2base = torch.Tensor(np.load(str(BASE / "base.npz"))["base"])
 
+if not (statdir := bela.ROOT / "stats").exists():
+    statdir.mkdir(parents=True, exist_ok=True)
+
 
 @dataclass
 class DataStats:
     head: str
-    stats: dict[str, dict[str, torch.Tensor]] = field(default_factory=lambda: {})
+    repo_id: str  # hf repo ie : "lerobot/robot"
+    dataset: LeRobotDataset
+
+    stats: dict[str, dict[str, torch.Tensor]] | None = None
     quick: bool = False  # quick compute stats ?
 
     @property
+    def loc(self):
+        return bela.ROOT / "stats"
+
+    @property
     def path(self):
-        return Path(bela.ROOT) / f"stats_{self.head}.pt"
+        repo = self.repo_id.replace("/", "_")
+        return self.loc / f"stats-{self.head}-{repo}.pt"
 
     def load(self):
         stats = torch.load(self.path) if self.path.exists() else {}
@@ -33,16 +44,16 @@ class DataStats:
     def save(self):
         torch.save(self.stats, self.path)
 
-    def compute(self, dataset, batchspec):
+    def compute(self, batchspec):
         if not self.stats:
-            self.stats = compute_stats(dataset, batchspec, head=self.head, quick=self.quick)
+            self.stats = compute_stats(self.dataset, batchspec, head=self.head, quick=self.quick)
             self.save()
 
-    def maybe_compute(self, dataset, batchspec):
+    def maybe_compute(self, batchspec):
         if not self.stats:
             self.load()
         if not self.stats:
-            self.compute(dataset, batchspec)
+            self.compute(batchspec)
         return self.stats
 
 
@@ -137,6 +148,8 @@ def postprocess(batch, batchspec, head, flat=True):
 
         # convert mano.hand_pose to rotation_6d
         manopose = batch["observation.human.mano.hand_pose"]  # b,t,m,3,3
+        selected = [0, 1, 2, 3, 6, 9, 12]  # palm
+        manopose = manopose[:, :, selected]
         manopose = matrix_to_rotation_6d(manopose.reshape(-1, 3, 3))
         manopose = manopose.reshape(bs, t, -1, manopose.shape[-1])
         manopose = manopose.reshape(bs, t, -1) if flat else manopose
@@ -184,7 +197,7 @@ def compute_stats(dataset, batchspec, head, quick=False):
 
     stats, data = {}, []
     samples = list(range(len(dataset)))
-    samples = samples[:1000] if quick else samples
+    samples = samples[:8000] if quick else samples
 
     for i in tqdm(samples, total=len(samples), desc="Computing stats", leave=False):
         d = dataset[i]
