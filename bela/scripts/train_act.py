@@ -17,7 +17,6 @@ from contextlib import nullcontext
 import logging
 from pprint import pformat
 import time
-from typing import Any
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
@@ -25,8 +24,6 @@ from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
-from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.utils import get_device_from_parameters
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.train_utils import (
@@ -39,7 +36,6 @@ from lerobot.common.utils.train_utils import (
 from lerobot.common.utils.utils import (
     format_big_number,
     get_safe_torch_device,
-    has_method,
     init_logging,
 )
 from lerobot.common.utils.wandb_utils import WandBLogger
@@ -49,59 +45,8 @@ from lerobot.scripts.eval import eval_policy
 from termcolor import colored
 import torch
 from torch.amp import GradScaler
-from torch.optim import Optimizer
 
-
-def update_policy(
-    train_metrics: MetricsTracker,
-    policy: PreTrainedPolicy,
-    batch: Any,
-    optimizer: Optimizer,
-    grad_clip_norm: float,
-    grad_scaler: GradScaler,
-    lr_scheduler=None,
-    use_amp: bool = False,
-    lock=None,
-) -> tuple[MetricsTracker, dict]:
-    start_time = time.perf_counter()
-    device = get_device_from_parameters(policy)
-    policy.train()
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
-        loss, output_dict = policy.forward(batch)
-        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-    grad_scaler.scale(loss).backward()
-
-    # Unscale the gradient of the optimizer's assigned params in-place **prior to gradient clipping**.
-    grad_scaler.unscale_(optimizer)
-
-    grad_norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(),
-        grad_clip_norm,
-        error_if_nonfinite=False,
-    )
-
-    # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
-    # although it still skips optimizer.step() if the gradients contain infs or NaNs.
-    with lock if lock is not None else nullcontext():
-        grad_scaler.step(optimizer)
-    # Updates the scale for next iteration.
-    grad_scaler.update()
-
-    optimizer.zero_grad()
-
-    # Step through pytorch scheduler at every batch instead of epoch
-    if lr_scheduler is not None:
-        lr_scheduler.step()
-
-    if has_method(policy, "update"):
-        # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
-        policy.update()
-
-    train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm.item()
-    train_metrics.lr = optimizer.param_groups[0]["lr"]
-    train_metrics.update_s = time.perf_counter() - start_time
-    return train_metrics, output_dict
+from bela.train_tools import update_policy
 
 
 @parser.wrap()
