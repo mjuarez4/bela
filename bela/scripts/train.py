@@ -8,8 +8,7 @@ import time
 from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 from lerobot.common import envs
-from lerobot.common.datasets.sampler import EpisodeAwareSampler
-from lerobot.common.datasets.utils import cycle
+from bela.common import make_dataloaders
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.optim.optimizers import AdamConfig, AdamWConfig
 from lerobot.common.policies.act.configuration_act import ACTConfig
@@ -39,7 +38,6 @@ import torch
 from torch.amp import GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 import tyro
 
 import bela
@@ -326,57 +324,16 @@ def main(cfg: MyTrainConfig):
             logging.info(f"Distributed training on {world_size} GPUs")
 
         # Build a dataloader per dataset
-        dl_iters, samplers = {}, {}
-        batch_size = cfg.batch_size // world_size if is_distributed else cfg.batch_size
-        for head in heads:
-            dataset = datasets[head]
-            if is_distributed:
-                if hasattr(cfg.policy, "drop_n_last_frames"):
-                    episodic_sampler = EpisodeAwareSampler(
-                        dataset.episode_data_index,
-                        drop_n_last_frames=cfg.policy.drop_n_last_frames,
-                        shuffle=True,
-                    )
-                    sampler = DistributedSampler(
-                        episodic_sampler,
-                        num_replicas=world_size,
-                        rank=rank,
-                        shuffle=True,
-                        seed=cfg.seed if cfg.seed is not None else 0,
-                    )
-                else:
-                    sampler = DistributedSampler(
-                        dataset,
-                        num_replicas=world_size,
-                        rank=rank,
-                        shuffle=True,
-                        seed=cfg.seed if cfg.seed is not None else 0,
-                    )
-                shuffle = False
-            else:
-                if hasattr(cfg.policy, "drop_n_last_frames"):
-                    shuffle = False
-                    sampler = EpisodeAwareSampler(
-                        dataset.episode_data_index,
-                        drop_n_last_frames=cfg.policy.drop_n_last_frames,
-                        shuffle=True,
-                    )
-                else:
-                    shuffle = True
-                    sampler = None
+        dl_iters, samplers = make_dataloaders(
+            datasets,
+            cfg,
+            is_distributed,
+            rank,
+            world_size,
+            device,
+        )
 
-            samplers[head] = sampler
-            dataloader = torch.utils.data.DataLoader(
-                dataset,
-                num_workers=cfg.num_workers,
-                prefetch_factor=4,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                sampler=sampler,
-                pin_memory=device.type != "cpu",
-                drop_last=False,
-            )
-            dl_iters[head] = cycle(dataloader)
+        batch_size = cfg.batch_size // world_size if is_distributed else cfg.batch_size
 
         dataset_ref = datasets[heads[0]]
 
