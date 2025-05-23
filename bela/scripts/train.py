@@ -5,7 +5,7 @@ import logging
 from pprint import pformat
 import time
 
-from flax.traverse_util import flatten_dict, unflatten_dict
+from flax.traverse_util import flatten_dict
 import jax
 from lerobot.common import envs
 from bela.common import make_dataloaders
@@ -85,21 +85,6 @@ class MyTrainConfig(TrainPipelineConfig):
 
     def to_dict(self):
         return asdict(self)
-
-
-def prepare_log_dict(d: dict[str, float]):
-    """Prepare a log dict for wandb."""
-
-    d = {k.replace(".", "/"): v for k, v in flatten_dict(d, sep="/").items()}
-    pprint(unflatten_dict(d, sep="/"))
-
-    def _detach(x):
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().item()
-        return x
-
-    d = jax.tree.map(_detach, d)
-    return d
 
 
 def main(cfg: MyTrainConfig):
@@ -339,13 +324,7 @@ def main(cfg: MyTrainConfig):
 
         policy.train()
 
-        train_metrics = {
-            "loss": AverageMeter("loss", ":.3f"),
-            "grad_norm": AverageMeter("grdn", ":.3f"),
-            "lr": AverageMeter("lr", ":0.1e"),
-            "update_s": AverageMeter("updt_s", ":.3f"),
-            "dataloading_s": AverageMeter("data_s", ":.3f"),
-        }
+        train_metrics = tt.make_train_metrics()
 
         train_tracker = MetricsTracker(
             batch_size,
@@ -476,7 +455,7 @@ def main(cfg: MyTrainConfig):
                         wandb_log_dict["total_batch_size"] = batch_size * world_size
                         if output_dict:
                             wandb_log_dict.update(output_dict)
-                        wandb_logger.log_dict(prepare_log_dict(wandb_log_dict), step)
+                        wandb_logger.log_dict(tt.prepare_log_dict(wandb_log_dict), step)
 
                 train_tracker.reset_averages()
 
@@ -497,46 +476,15 @@ def main(cfg: MyTrainConfig):
 
             # Only the main process handles evaluation
             if rank == 0 and cfg.env and is_eval_step:
-                step_id = get_step_identifier(step, cfg.steps)
-                logging.info(f"Eval policy at step {step}")
-                eval_start_time = time.time()
-                with (
-                    torch.no_grad(),
-                    torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
-                ):
-                    # Unwrap the policy if using DDP
-                    eval_policy_model = policy.module if is_distributed else policy
-                    eval_info = eval_policy(
-                        eval_env,
-                        eval_policy_model,
-                        cfg.eval.n_episodes,
-                        videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                        max_episodes_rendered=4,
-                        start_seed=cfg.seed,
-                    )
-                eval_time = time.time() - eval_start_time
-
-                eval_metrics = {
-                    "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
-                    "pc_success": AverageMeter("success", ":.1f"),
-                    "eval_s": AverageMeter("eval_s", ":.3f"),
-                }
-                eval_tracker = MetricsTracker(
-                    cfg.batch_size,
-                    dataset_ref.num_frames,
-                    dataset_ref.num_episodes,
-                    eval_metrics,
-                    initial_step=step,
+                tt.eval_and_log(
+                    step,
+                    policy,
+                    dataset_ref,
+                    cfg,
+                    eval_env,
+                    wandb_logger,
+                    is_distributed,
                 )
-                eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
-                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
-                eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
-                logging.info(f"[Eval time: {eval_time:.2f}s] {eval_tracker}")
-                if wandb_logger:
-                    wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    wandb_log_dict["eval_time"] = eval_time
-                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
 
         # Cleanup
         if eval_env:
