@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import jax
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
+import math
 from pytorch3d.transforms import matrix_to_rotation_6d
 import torch
 from tqdm import tqdm
@@ -190,23 +191,32 @@ def postprocess(batch, batchspec, head, flat=True):
     return batch
 
 
-def compute_stats(dataset, batchspec, head, quick=False):
-    """Compute statistics for normalization
-    you need separate stats for actions even with shared heads
-    """
+def compute_stats(dataset, batchspec, head, quick=False, batch_size=64, num_workers=4):
+    """Compute statistics using a dataloader for speed."""
 
-    stats, data = {}, []
-    samples = list(range(len(dataset)))
-    samples = samples[:8000] if quick else samples
+    limit = min(len(dataset), 8000) if quick else len(dataset)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        drop_last=False,
+    )
 
-    for i in tqdm(samples, total=len(samples), desc="Computing stats", leave=False):
-        d = dataset[i]
-        d.pop("task")
-        d = jax.tree.map(lambda x: x.unsqueeze(0), d)
-        d = postprocess(d, batchspec, head=head)
-        d.pop("heads")
-        data.append(d)
-    data = jax.tree.map(lambda *x: torch.concatenate((x)), data[0], *data[1:])
+    data, seen = [], 0
+    total_batches = math.ceil(limit / batch_size)
+    for batch in tqdm(loader, total=total_batches, desc="Computing stats", leave=False):
+        if seen >= limit:
+            break
+        batch.pop("task", None)
+        batch = postprocess(batch, batchspec, head=head)
+        batch.pop("heads")
+        keep = min(limit - seen, next(iter(batch.values())).shape[0])
+        if keep != next(iter(batch.values())).shape[0]:
+            batch = jax.tree.map(lambda x: x[:keep], batch)
+        seen += keep
+        data.append(batch)
+    data = jax.tree.map(lambda *x: torch.concatenate(x), *data)
     data.pop("action_is_pad")  # doesnt need stats
 
     def make_stat(stack):
