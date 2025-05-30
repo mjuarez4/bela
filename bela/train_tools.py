@@ -9,7 +9,8 @@ from typing import Any
 from lerobot.common.envs.factory import make_env
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import get_device_from_parameters
-from lerobot.common.utils.logging_utils import MetricsTracker
+from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
+from lerobot.common.utils.train_utils import get_step_identifier
 from lerobot.common.utils.utils import has_method
 import torch
 from torch.amp import GradScaler
@@ -190,3 +191,85 @@ def create_distributed_envs(env_cfg, world_size: int, rank: int):
     """Build environment shards per rank."""
     env_seed = (getattr(env_cfg, "seed", 0) or 0) + rank * 1000
     return make_env(env_cfg, n_envs=getattr(env_cfg, "n_envs_per_process", 1), start_seed=env_seed)
+
+
+def make_train_metrics() -> dict[str, AverageMeter]:
+    """Meters for loss, grad norm, lr and timing."""
+    return {
+        "loss": AverageMeter("loss", ":.3f"),
+        "grad_norm": AverageMeter("grdn", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+    }
+
+
+def prepare_log_dict(d: dict[str, float]) -> dict[str, float]:
+    """Detach tensors and flatten keys for wandb."""
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    import jax
+    import torch
+    from rich.pretty import pprint
+
+    d = {k.replace(".", "/"): v for k, v in flatten_dict(d, sep="/").items()}
+    pprint(unflatten_dict(d, sep="/"))
+
+    def _det(x):
+        return x.detach().cpu().item() if isinstance(x, torch.Tensor) else x
+
+    return jax.tree.map(_det, d)
+
+
+def eval_and_log(
+    step: int,
+    policy: PreTrainedPolicy,
+    dataset_ref,
+    cfg,
+    eval_env,
+    wandb_logger=None,
+    is_distributed: bool = False,
+):
+    """Evaluate policy and optionally log to wandb."""
+
+    from lerobot.scripts.eval import eval_policy
+
+    device = get_device_from_parameters(policy)
+    step_id = get_step_identifier(step, cfg.steps)
+    logging.info(f"Eval policy at step {step}")
+    start_t = time.time()
+    with (
+        torch.no_grad(),
+        torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
+    ):
+        p = policy.module if is_distributed else policy
+        info = eval_policy(
+            eval_env,
+            p,
+            cfg.eval.n_episodes,
+            videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
+            max_episodes_rendered=4,
+            start_seed=cfg.seed,
+        )
+    eval_s = time.time() - start_t
+
+    eval_metrics = {
+        "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
+        "pc_success": AverageMeter("success", ":.1f"),
+        "eval_s": AverageMeter("eval_s", ":.3f"),
+    }
+    tracker = MetricsTracker(
+        cfg.batch_size,
+        dataset_ref.num_frames,
+        dataset_ref.num_episodes,
+        eval_metrics,
+        initial_step=step,
+    )
+    tracker.eval_s = info["aggregated"].pop("eval_s")
+    tracker.avg_sum_reward = info["aggregated"].pop("avg_sum_reward")
+    tracker.pc_success = info["aggregated"].pop("pc_success")
+    logging.info(f"[Eval time: {eval_s:.2f}s] {tracker}")
+    if wandb_logger:
+        log_dict = {**tracker.to_dict(), **info, "eval_time": eval_s}
+        wandb_logger.log_dict(log_dict, step, mode="eval")
+        wandb_logger.log_video(info["video_paths"][0], step, mode="eval")
+

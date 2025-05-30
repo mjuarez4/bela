@@ -16,9 +16,7 @@ dependencies = [
     "huggingface-hub[hf-xet]>=0.31.2",
     "iopath",
     "jax>=0.6.0",
-    "lerobot",
     "numpy>=2.2.5",
-    "pytorch3d",
     # "pytorch3d",
     "rich>=14.0.0",
     "torch>=2.6.0",
@@ -30,9 +28,11 @@ dependencies = [
 dev = [
     "pre-commit>=4.2.0",
 ]
+build = [ 
+    "pytorch3d", 
+]
 
 [tool.uv.sources]
-lerobot = { git = "https://github.com/huggingface/lerobot" }
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
 iopath = { git = "https://github.com/facebookresearch/iopath" }
 pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
