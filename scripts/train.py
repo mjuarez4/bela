@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 import logging
 from pprint import pformat
 import time
+import wandb
 
 from flax.traverse_util import flatten_dict
 import jax
@@ -240,6 +241,12 @@ def main(cfg: MyTrainConfig):
         # This ensures get_optim_params() works correctly
         if rank == 0:
             logging.info("Creating optimizer and scheduler")
+
+        #override optimization settings for testing
+        cfg.optimizer.lr = 1e-3
+        cfg.optimizer.weight_decay = 0.0
+
+
         optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
         # Now wrap the policy with DDP and enable unused parameter detection
@@ -378,6 +385,7 @@ def main(cfg: MyTrainConfig):
                 lr_scheduler=lr_scheduler,
                 use_amp=cfg.policy.use_amp,
                 lock=optimizer_lock,
+                step=step,
             )
 
             # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
@@ -453,9 +461,16 @@ def main(cfg: MyTrainConfig):
                         wandb_log_dict["steps_per_second"] = steps_per_second
                         wandb_log_dict["total_gpus"] = world_size
                         wandb_log_dict["total_batch_size"] = batch_size * world_size
-                        if output_dict:
-                            wandb_log_dict.update(output_dict)
+
+                        histogram_logs = {k: v for k, v in output_dict.items() if isinstance(v, wandb.Histogram)}
+                        metric_logs = {k: v for k, v in output_dict.items() if not isinstance(v, wandb.Histogram)}
+
+                        wandb_log_dict.update(metric_logs)
                         wandb_logger.log_dict(tt.prepare_log_dict(wandb_log_dict), step)
+                        #wandb logging for histograms
+                        if histogram_logs:
+                            #this makes them appear in the dashboard
+                            wandb.log(histogram_logs, step=step)  
 
                 train_tracker.reset_averages()
 

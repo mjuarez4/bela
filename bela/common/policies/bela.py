@@ -16,9 +16,11 @@ import torch.nn.functional as F  # noqa: N812
 import torchvision
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
-
+import matplotlib.pyplot as plt
+import os
 from bela.typ import HeadSpec
-
+import math
+import wandb
 
 def recursive_moduledict(d: dict):
     out = {}
@@ -338,6 +340,7 @@ class BELAPolicy(ACTPolicy):
             print(head)
             in_feat, out_feat = config.input_features, config.output_features
             norm, stat = config.normalization_mapping, _stat.stats
+            print(stat)
 
             # <robot/human> norm can only norm for <robot/human> batch
             in_feat = {k: v for k, v in in_feat.items() if k in _stat.stats}
@@ -415,7 +418,7 @@ class BELAPolicy(ACTPolicy):
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
 
-    def _forward(self, batch: dict[str, Tensor], heads=None) -> tuple[Tensor, dict]:
+    def _forward(self, batch: dict[str, Tensor], heads=None, step: int = 0) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
 
         if heads is None:
@@ -428,7 +431,38 @@ class BELAPolicy(ACTPolicy):
             batch = dict(batch)
             imgs = [batch.get(key, None) for key in self.config.image_features]
             batch["observation.images"] = [x for x in imgs if x is not None]
+            for i, img in enumerate(batch["observation.images"]):
+                if img is not None:
+                    print(f"Image {i} min/max:", img.min().item(), img.max().item())
+
+        # Before normalization — save raw values
+        if not hasattr(self, "_raw_action_vals"):
+            self._raw_action_vals = {}
+        self._raw_action_vals.clear()
+        for k in batch:
+            if k.startswith("action.") and any(prefix in k for prefix in ["robot", "human", "shared"]):
+                self._raw_action_vals[k] = batch[k].detach().cpu().flatten().numpy()
+
+        print("Before normalization:")
+        for k in batch:
+            if k.startswith(f"action.{basehead}"):
+                print(f"{k} mean:", batch[k].mean().item(), "std:", batch[k].std().item())
+
+
+        #normalize targets
         batch = self.normalize_targets(batch, basehead)
+
+        print("Batch keys after norm:", batch.keys())
+
+
+        print("After normalization:")
+        for k in batch:
+            if k.startswith(f"action.{basehead}"):
+                print(f"{k} mean:", batch[k].mean().item(), "std:", batch[k].std().item())
+
+        for k in batch:
+            if "action.robot" in k:
+                print(k, batch[k].mean().item(), batch[k].std().item())
 
         for h in heads:
             key = f"action.{h}"
@@ -439,6 +473,13 @@ class BELAPolicy(ACTPolicy):
             item = [batch[k] for k in batch if (key in k and "image" not in k)]
             batch[key] = torch.cat(item, dim=-1)
 
+        if "action.robot" in batch:
+            print("action.robot mean:", batch["action.robot"].mean().item())
+            print("action.robot std:", batch["action.robot"].std().item())
+        elif "action.human" in batch:
+            print("action.human mean:", batch["action.human"].mean().item())
+            print("action.human std:", batch["action.human"].std().item())
+
         out, (mu_hat, log_sigma_x2_hat) = self.model(batch, heads)
 
         ah = {k: v for k, v in flatten_dict(out, sep=".").items()}
@@ -448,7 +489,8 @@ class BELAPolicy(ACTPolicy):
             if any([h in k for h in heads]):
                 losses[k] = (F.l1_loss(batch[k], ahv, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)).mean()
 
-        losses["l1"] = torch.Tensor(list(losses.values())).mean()
+        losses["l1"] = torch.stack(list(losses.values())).mean()
+
         if self.config.use_vae:
             # Calculate Dₖₗ(latent_pdf || standard_normal). Note: After computing the KL-divergence for
             # each dimension independently, we sum over the latent dimension to get the total
@@ -457,18 +499,49 @@ class BELAPolicy(ACTPolicy):
             mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
             losses["kld"] = mean_kld  # .item()
             loss = losses["l1"] + mean_kld * self.config.kl_weight
+            #loss = losses["l1"]
+
         else:
             loss = losses["l1"]
 
         losses = {k: v.item() for k, v in losses.items()}
         losses["loss"] = loss.detach().clone().item()
-        return loss, losses  # , out
+        
+        #debug prints
+        print("LOSS:", loss.item())
+        print("Percent non-pad:", (~batch["action_is_pad"]).float().mean().item())
+        print("mu_hat mean/std:", mu_hat.mean().item(), mu_hat.std().item())
+        print("log_sigma_x2_hat mean/std:", log_sigma_x2_hat.mean().item(), log_sigma_x2_hat.std().item())
 
-    def forward(self, batches: list[dict[str, Tensor]]) -> tuple[Tensor, dict]:
+
+        # wandb histogram logging
+        logs = {}
+        if wandb.run is not None and step % 200 == 0:
+            raw_logs = {}
+            norm_logs = {}
+
+            for k in batch:
+                if k.startswith("action.") and any(prefix in k for prefix in ["robot", "human", "shared"]):
+                    normed = batch[k].detach().cpu().flatten().numpy()
+                    norm_logs[f"{k}_norm"] = wandb.Histogram(normed)
+
+            for k, vals in self._raw_action_vals.items():
+                raw_logs[f"{k}_raw"] = wandb.Histogram(vals)
+
+            logs = {**raw_logs, **norm_logs}
+
+        return loss, losses, logs
+
+
+
+    def forward(self, batches: list[dict[str, Tensor]], step: int = 0) -> tuple[Tensor, dict]:
         losses, infos = [], []
+        merged_logs = {}
+
         for b in batches:
-            loss, info = self._forward(b)
+            loss, info, extra_logs = self._forward(b, step=step)
             losses.append(loss)
             infos.append(info)
+            merged_logs.update(extra_logs)
         loss = torch.stack(losses).mean()
-        return loss, infos
+        return loss, infos, merged_logs

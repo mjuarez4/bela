@@ -1,4 +1,3 @@
-# uv run -- torchrun --standalone --nnodes=1 --nproc-per-node=4
 uv run \
     bela/scripts/train.py \
     --dataset.repo_id=mhyatt000/duck --dataset.revision v2.1 --batch_size=64 \

@@ -191,7 +191,7 @@ def postprocess(batch, batchspec, head, flat=True):
     return batch
 
 
-def compute_stats(dataset, batchspec, head, quick=False, batch_size=64, num_workers=4):
+def compute_stats(dataset, batchspec, head, quick=False, batch_size=64, num_workers=1):
     """Compute statistics using a dataloader for speed."""
 
     limit = min(len(dataset), 8000) if quick else len(dataset)

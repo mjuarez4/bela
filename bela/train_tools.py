@@ -62,12 +62,14 @@ def cleanup_distributed() -> None:
 # ---- training --------------------------------------------------------------
 
 
-def _compute_loss(policy: PreTrainedPolicy, batch: Any, use_amp: bool) -> tuple[torch.Tensor, dict]:
+def _compute_loss(policy: PreTrainedPolicy, batch: Any, use_amp: bool) -> tuple[torch.Tensor, dict, dict]:
     """Forward pass through the policy."""
     device = get_device_from_parameters(policy)
     policy.train()
     with torch.autocast(device_type=device.type) if use_amp else nullcontext():
-        return policy.forward(batch)
+        loss, info, extra_logs = policy.forward(batch, step=batch[0].get("step", 0)) 
+    return loss, info, extra_logs
+
 
 
 def _step_optimizer(optimizer: Optimizer, scaler: GradScaler, lock=None) -> None:
@@ -118,6 +120,7 @@ def update_policy_multi(
     grad_scaler: GradScaler,
     lr_scheduler=None,
     use_amp: bool = False,
+    step: int = 0,
     lock=None,
 ) -> tuple[MetricsTracker, dict]:
     """Backpropagate using the mean loss from multiple batches."""
@@ -125,8 +128,8 @@ def update_policy_multi(
 
     # losses, out_dict = [], {}
     out_dict = {}
-    loss, _infos = _compute_loss(policy, list(batches.values()), use_amp)
-
+    loss, _infos, extra_logs = _compute_loss(policy, list(batches.values()), use_amp)
+    
     for head, info in zip(batches.keys(), _infos):
         out_dict[head] = info
 
@@ -153,7 +156,7 @@ def update_policy_multi(
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start
-    return train_metrics, out_dict
+    return train_metrics, {**out_dict, **extra_logs}
 
 
 # ---- metrics ----------------------------------------------------------------
