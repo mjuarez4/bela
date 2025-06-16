@@ -242,11 +242,6 @@ def main(cfg: MyTrainConfig):
         if rank == 0:
             logging.info("Creating optimizer and scheduler")
 
-        #override optimization settings for testing
-        cfg.optimizer.lr = 1e-3
-        cfg.optimizer.weight_decay = 0.0
-
-
         optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
         # Now wrap the policy with DDP and enable unused parameter detection
