@@ -189,18 +189,38 @@ def main(cfg: MyTrainConfig):
         stats = flatten_dict(jax.tree.map_with_path(dat2stat, datasets), sep=".")
         datasets = {s.head: s.dataset for s in stats.values()}
 
-        assert len(stats) == len(heads), f"expected {len(heads)} stats, got {len(stats)}"
+        assert len(stats) == len(heads), f"MADDIE expected {len(heads)} stats, got {len(stats)}"
         stats = {s.head: s for s in stats.values()}
         pprint(stats)
-
+        #torch.save(stats, "dataset_stats_old.pt")
+        #dataset_stats = torch.load("dataset_stats_old.pt", weights_only=False)
+        #for s in stats.values():
+            #assert s.stats is not None, f"{s.head} has no stats!"
+            #s.dataset = None
+            #if hasattr(s, "meta"):
+            #    s.meta = None
+        
+        #torch.save(stats, "dataset_stats_m.pt")
         # stats = {head: DataStats(head=head ) for head in heads}
 
         for head, stat in stats.items():
             stat.maybe_compute(_batchspec)
-            # pprint(find_torch_unstable(stat.stats))
+            
+            mean = stat.stats.get("observation.robot.joints.mean")
+            std = stat.stats.get("observation.robot.joints.std")
+            print(f"DEBUGM {head} joint mean shape: {mean.shape if mean is not None else 'missing'}")
+            print(f"DEBUGM {head} joint std shape: {std.shape if std is not None else 'missing'}")
+
+           # pprint(find_torch_unstable(stat.stats))
             pprint(spec(stat.stats))
             pprint({k: v for k, v in stat.stats.items() if "image" not in k})
 
+        for stat in stats.values():
+            stat.dataset = None
+            if hasattr(stat, "meta"):
+                stat.meta = None
+
+        torch.save(stats, "dataset_stats_m.pt")
         assert "action_is_pad" in example, f"missing key=action_is_pad in {_head:=heads[-1]}"
 
         """
@@ -362,7 +382,34 @@ def main(cfg: MyTrainConfig):
                 batch = next(dl_iters[head])
                 batch = postprocess(batch, batchspec, head=head)
                 batches[head] = batch
-
+                if rank == 0 and head == "robot":
+                    joints = batch.get("observation.robot.joints")
+                    joint_names = [
+                        'joint1',
+                        'joint2',
+                        'joint3',
+                        'joint4',
+                        'joint5',
+                        'joint6',
+                        'joint7',
+                        'drive_joint',
+                        'left_finger_joint',
+                        'left_inner_knuckle_joint',
+                        'right_outer_knuckle_joint',
+                        'right_finger_joint',
+                        'right_inner_knuckle_joint'
+                    ]
+                    if joints is not None:
+                        print(f"[DEBUG] Step {step} robot joints:")
+                        for i, joint_vec in enumerate(joints):  # batch dimension
+                            print(f"  Sample {i}:")
+                            for j, val in enumerate(joint_vec):
+                                name = joint_names[j] if j < len(joint_names) else f"joint{j+1}"
+                                print(f"    {name}: {val.item():.4f}")
+                        joints_tensor = torch.stack(joints) if isinstance(joints, list) else joints
+                        for j, name in enumerate(joint_names[:joints_tensor.shape[1]]):
+                            wandb.log({f"joint_dist/{name}": wandb.Histogram(joints_tensor[:, j].cpu().numpy())},step=step)
+            
             train_tracker.dataloading_s = time.perf_counter() - start_time
 
             for batch in batches.values():
