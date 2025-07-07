@@ -152,12 +152,12 @@ def main(cfg: MyTrainConfig):
                     # "pose": PolicyFeature(FeatureType.STATE, (6,)),
                     "gripper": PolicyFeature(FeatureType.STATE, (1,)),
                 },
-                "human": {
+                #"human": {
                     # "gripper": PolicyFeature(FeatureType.STATE, (1,)),
-                    "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 9)),  # (15, 3, 3)),
+                   # "mano.hand_pose": PolicyFeature(FeatureType.STATE, (15, 9)),  # (15, 3, 3)),
                     # "mano.global_orient": PolicyFeature( FeatureType.STATE, (3,)),  # (3, 3)),
                     # "kp3d": PolicyFeature(FeatureType.STATE, (21, 3)),
-                },
+                #},
                 "shared": {
                     "image.low": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)),
                     "cam.pose": PolicyFeature(FeatureType.STATE, (6,)),
@@ -238,7 +238,8 @@ def main(cfg: MyTrainConfig):
         #
         # update batchspec to reflect the postprocessed dataset
         #
-        newbatchspec = flatten_dict(stats["human"].stats | stats["robot"].stats, sep=".")
+        #newbatchspec = flatten_dict(stats["human"].stats | stats["robot"].stats, sep=".")
+        newbatchspec = flatten_dict(stats["robot"].stats, sep=".")
         newbatchspec = {_k.replace(".mean", ""): v for _k, v in newbatchspec.items() if "mean" in _k}
 
         def shape_to_policyfeat(path, t: torch.Tensor):
