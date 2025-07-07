@@ -9,6 +9,7 @@ import torch
 import tyro
 
 from bela.common.policies.bela import BELAPolicy
+from bela.common.policies.headspec import build_headspec
 from bela.typ import Head, HeadSpec, Morph, PolicyFeature
 
 
@@ -31,18 +32,21 @@ def make_policy(batchspec: dict[str, PolicyFeature], stats, examples):
     # batchspec = batchspec | unflatten_dict(output_features, sep=".")
     # pprint(batchspec)
 
-    def compute_head(feat, head):
-        headfeat = {k: v for k, v in feat if head in k}
-        headfeat = {k: Head(None, v.shape) for k, v in headfeat.items()}
-        return sum(list(headfeat.values()), Head(None, (0,)))
+    #def compute_head(feat, head):
+    #    headfeat = {k: v for k, v in feat if head in k}
+    #    headfeat = {k: Head(None, v.shape) for k, v in headfeat.items()}
+    #    return sum(list(headfeat.values()), Head(None, (0,)))
 
-    headspec = HeadSpec(
-        robot=Head(Morph.ROBOT, compute_head(state_features.items(), "robot").shape),
-        human=Head(Morph.HUMAN, compute_head(state_features.items(), "human").shape),
-        share=Head(Morph.HR, compute_head(state_features.items(), "shared").shape),
-    )
-    pprint(headspec)
+    #headspec = HeadSpec(
+    #    robot=Head(Morph.ROBOT, compute_head(state_features.items(), "robot").shape),
+    #    human=Head(Morph.HUMAN, compute_head(state_features.items(), "human").shape),
+    #    share=Head(Morph.HR, compute_head(state_features.items(), "shared").shape),
+    #)
+    #pprint(headspec)
 
+
+    test_m = build_headspec(state_features)
+    pprint(test_m)
     bs, chunk = 4, 50
 
     """
@@ -68,7 +72,8 @@ def make_policy(batchspec: dict[str, PolicyFeature], stats, examples):
     )
     policy = BELAPolicy(
         config=policycfg,
-        headspec=headspec,
+        #headspec=headspec,
+        headspec=build_headspec(state_features),
         dataset_stats=stats,
     )
 

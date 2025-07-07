@@ -135,7 +135,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "torch", specifier = ">=2.6.0" },
     { name = "tyro", specifier = ">=0.9.20" },
-    { name = "xgym", editable = "../../jgoldberg/xgym" },
+    { name = "xgym", editable = "../xgym" },
 ]
 provides-extras = ["dev", "build"]
 
@@ -2319,7 +2319,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/02/20/aa6578e060abe1a70
 [[package]]
 name = "xgym"
 version = "0.1.0"
-source = { editable = "../../jgoldberg/xgym" }
+source = { editable = "../xgym" }
 dependencies = [
     { name = "arm-pytorch-utilities" },
     { name = "av" },
