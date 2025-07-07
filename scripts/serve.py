@@ -34,7 +34,14 @@ from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
 from lerobot.configs.types import NormalizationMode
 
-
+#new - maddie
+from bela.common.policies.bela import BELAPolicy
+from bela.common.datasets.util import DataStats
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from pathlib import PosixPath
+import torch.serialization
+from bela.common.policies.headspec import build_headspec
+from bela.typ import FeatureType, PolicyFeature
 @parser.wrap()
 def main(cfg: EvalPipelineConfig):
     logging.info(pformat(asdict(cfg)))
@@ -315,9 +322,17 @@ from lerobot.configs.train import TrainPipelineConfig
 
 
 def main(cfg: ServeConfig) -> None:
-
+    
+    torch.serialization.add_safe_globals([DataStats, LeRobotDataset, LeRobotDatasetMetadata, PosixPath])
+    
+    dset_stats = torch.load("./dataset_stats_m.pt")
+    #for head, stat_obj in dataset_stats.items():
+       # print(dataset_stats["robot"].stats.keys())
+      # joints_mean = dataset_stats["robot"].stats.get("observation.robot.gripper")
+      # print("Mean:", joints_mean.get("mean"))
+       
     ckpt_file = Path(cfg.ckpt.dir) / "pretrained_model" / "config.json"
-    ptm_file = Path(cfg.ckpt.dir) / "pretrained_model"
+    ptm_file = Path(cfg.ckpt.dir) 
     with open(ckpt_file, "r") as f:
         ckpt = json.load(f)
     del ckpt["type"]
@@ -330,19 +345,33 @@ def main(cfg: ServeConfig) -> None:
     pprint(ckpt)
     policycfg.pretrained_path = ptm_file
     pprint(policycfg)
+    
 
+    input_features = {
+        k: PolicyFeature(type=FeatureType[v["type"]], shape=tuple(v["shape"]))
+        for k, v in ckpt["input_features"].items()
+    }
+
+    output_features = {
+        k: PolicyFeature(type=FeatureType[v["type"]], shape=tuple(v["shape"]))
+        for k, v in ckpt["output_features"].items()
+    }
+    state_features = {k: v for k, v in input_features.items() if v.type == FeatureType.STATE}
     train_file = Path(cfg.ckpt.dir) / "pretrained_model" / "train_config.json"
     with open(train_file, "r") as f:
-        ckpt = json.load(f)
+        ckpt_t = json.load(f)
 
-    traincfg = TrainPipelineConfig(**ckpt)
+    for key in ["human_repos", "human_revisions", "robot_repos", "robot_revisions"]:
+        ckpt_t.pop(key, None)
+
+    traincfg = TrainPipelineConfig(**ckpt_t)
     traincfg.dataset = DatasetConfig(**traincfg.dataset)
     traincfg.dataset.image_transforms = ImageTransformsConfig(
         **traincfg.dataset.image_transforms
     )
     traincfg.observation_delta_indices = None
     traincfg.policy = policycfg
-    pprint(traincfg)
+    #pprint(traincfg)
     dataset = make_dataset(traincfg)
     ds_meta = dataset.meta
     del dataset
@@ -354,11 +383,19 @@ def main(cfg: ServeConfig) -> None:
     policycfg.n_action_steps = 25
     policycfg.n_action_steps = 50
 
-    policy = make_policy(
+    policy_t = make_policy(
         cfg=policycfg,
         ds_meta=ds_meta,
-        # env_cfg=cfg.env,
+        #env_cfg=cfg.env,
     )
+
+    #policy - test maddie
+    policy  = BELAPolicy(
+           config = policy_t,
+           headspec = build_headspec(state_features),
+           dataset_stats = dset_stats
+            )
+
     policy.eval()
     # policy_metadata = policy.metadata
 
