@@ -36,8 +36,8 @@ build = [
 egomimic = { git = "https://github.com/SimarKareer/EgoMimic" }
 iopath = { git = "https://github.com/facebookresearch/iopath" }
 pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
-xgym = { path = "/home/jgoldberg/xgym", editable = true }
-
+xgym = { path = "../xgym", editable = true }
+lerobot = {path = "../test_code/lerobot", editable = true}
 
 [tool.setuptools]
 packages = ["bela"]

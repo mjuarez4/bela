@@ -343,8 +343,13 @@ class BELAPolicy(ACTPolicy):
             print(stat)
 
             # <robot/human> norm can only norm for <robot/human> batch
-            in_feat = {k: v for k, v in in_feat.items() if k in _stat.stats}
-            out_feat = {k: v for k, v in out_feat.items() if k in _stat.stats}
+            #in_feat = {k: v for k, v in in_feat.items() if k in _stat.stats}
+            #out_feat = {k: v for k, v in out_feat.items() if k in _stat.stats}
+            def is_excluded_key(k):
+                return "hand_pose" in k or "cam.pose" in k or "joints" in k
+
+            in_feat = {k: v for k, v in in_feat.items() if k in _stat.stats and not is_excluded_key(k)}
+            out_feat = {k: v for k,v in out_feat.items() if k in _stat.stats and not is_excluded_key(k)}
 
             self.norms[head] = {
                 "in": Normalize(in_feat, norm, stat),

@@ -34,62 +34,72 @@ from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
 from lerobot.configs.types import NormalizationMode
 
+import inspect
+from dataclasses import is_dataclass, fields
+def _allowed_keys_for(cls):
+    """Return the set of constructor / dataclass field names for cls."""
+    if is_dataclass(cls):
+        return {f.name for f in fields(cls)}
+    try:
+        return set(inspect.signature(cls).parameters.keys())
+    except (TypeError, ValueError):
+        return set()
 
-@parser.wrap()
-def main(cfg: EvalPipelineConfig):
-    logging.info(pformat(asdict(cfg)))
+def _filter_kwargs_for(cls, data: dict) -> dict:
+    """Keep only keys that cls actually accepts."""
+    allowed = _allowed_keys_for(cls)
+    return {k: v for k, v in data.items() if k in allowed}
 
-    # Check device is available
-    device = get_safe_torch_device(cfg.policy.device, log=True)
-
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    set_seed(cfg.seed)
-
-    logging.info(
-        colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}"
+def _find_model_cfg_path(root: Path) -> Path:
+    """Find config.json across common checkpoint layouts."""
+    candidates = [
+        root / "pretrained_model" / "config.json",
+        root / "config.json",
+        root / "pretrained_model" / "pretrained_model" / "config.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "config.json not found. Tried:\n- " + "\n- ".join(map(str, candidates))
     )
 
-    logging.info("Making environment.")
-    env = make_env(
-        cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs
-    )
+def _load_act_config(ckpt_root: Path):
+    """Load model config, drop HF-only keys, and build ACTConfig safely."""
+    cfg_path = _find_model_cfg_path(ckpt_root)
+    with open(cfg_path, "r") as f:
+        raw = json.load(f)
 
-    logging.info("Making policy.")
+    # Drop known HF / hub / metadata keys ONLY (keep device / use_amp if present)
+    DROP = {
+        "push_to_hub", "repo_id", "hub_model_id", "hub_private_repo", "hub_strategy",
+        "tags", "license", "_name_or_path", "transformers_version",
+        "torch_dtype", "architectures", "id2label", "label2id", "type",
+    }
+    for k in list(raw.keys()):
+        if k in DROP:
+            raw.pop(k, None)
 
-    policy = make_policy(
-        cfg=cfg.policy,
-        env_cfg=cfg.env,
-    )
-    policy.eval()
+    filtered = _filter_kwargs_for(ACTConfig, raw)
+    dropped = sorted(set(raw) - set(filtered))
+    if dropped:
+        logging.info("[serve] Dropping unsupported ACTConfig keys: %s", dropped)
 
-    with (
-        torch.no_grad(),
-        (
-            torch.autocast(device_type=device.type)
-            if cfg.policy.use_amp
-            else nullcontext()
-        ),
-    ):
-        info = eval_policy(
-            env,
-            policy,
-            cfg.eval.n_episodes,
-            max_episodes_rendered=10,
-            videos_dir=Path(cfg.output_dir) / "videos",
-            start_seed=cfg.seed,
-        )
-    print(info["aggregated"])
+    act_cfg = ACTConfig(**filtered)
 
-    # Save info
-    with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+    # Coerce enum values if present
+    if getattr(act_cfg, "normalization_mapping", None):
+        act_cfg.normalization_mapping = {
+            k: NormalizationMode(v) for k, v in act_cfg.normalization_mapping.items()
+        }
 
-    env.close()
-
-    logging.info("End of eval")
+    # Folder that actually holds model.safetensors, etc.
+    act_cfg.pretrained_path = cfg_path.parent
+    return act_cfg, cfg_path
 
 
+
+#@parser.wrap()
 # if __name__ == "__main__":
 # init_logging()
 # main()
@@ -313,7 +323,7 @@ from lerobot.common.datasets.transforms import ImageTransformsConfig
 from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.train import TrainPipelineConfig
 
-
+"""
 def main(cfg: ServeConfig) -> None:
 
     ckpt_file = Path(cfg.ckpt.dir) / "pretrained_model" / "config.json"
@@ -387,7 +397,80 @@ def main(cfg: ServeConfig) -> None:
         )
         server.serve_forever()
 
+"""
 
+def main(cfg: ServeConfig) -> None:
+    ckpt_root = Path(cfg.ckpt.dir)
+
+    # --- Load ACT config robustly (tolerant paths; drop HF-only keys) ---
+    policycfg, model_cfg_path = _load_act_config(ckpt_root)
+    pprint(policycfg)
+
+    # --- Load training args (optional, for dataset wiring) ---
+    train_candidates = [
+        model_cfg_path.parent / "train_config.json",
+        ckpt_root / "pretrained_model" / "train_config.json",
+        ckpt_root / "train_config.json",
+    ]
+    traincfg_json = None
+    for tpath in train_candidates:
+        if tpath.exists():
+            with open(tpath, "r") as f:
+                traincfg_json = json.load(f)
+            break
+    if traincfg_json is None:
+        raise FileNotFoundError(
+            "train_config.json not found. Tried:\n- " + "\n- ".join(map(str, train_candidates))
+        )
+
+    # Filter to what TrainPipelineConfig actually accepts
+    traincfg = TrainPipelineConfig(**_filter_kwargs_for(TrainPipelineConfig, traincfg_json))
+
+    # Conversions / enrichments you already had
+    traincfg.dataset = DatasetConfig(**traincfg.dataset)
+    traincfg.dataset.image_transforms = ImageTransformsConfig(**traincfg.dataset.image_transforms)
+    traincfg.observation_delta_indices = None
+    traincfg.policy = policycfg
+    pprint(traincfg)
+
+    dataset = make_dataset(traincfg)
+    ds_meta = dataset.meta
+    del dataset
+
+    # --- Your existing policy build continues unchanged below ---
+    policycfg.temporal_ensemble_coeff = None
+    policycfg.temporal_ensemble_coeff = 0.01
+    policycfg.n_action_steps = 1
+    policycfg.n_action_steps = 25
+    policycfg.n_action_steps = 50
+
+    policy = make_policy(
+        cfg=policycfg,
+        ds_meta=ds_meta,
+        # env_cfg=cfg.env,
+    )
+    policy.eval()
+
+    policy = LeRobotPolicy(policy, steps=policycfg.n_action_steps)
+    device = get_safe_torch_device(policycfg.device, log=True)
+    policy.device = device
+    policy = TryPolicy(policy)
+
+    with (
+        torch.no_grad(),
+        torch.autocast(device_type=device.type) if policycfg.use_amp else nullcontext(),
+    ):
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+
+        server = WebsocketPolicyServer(
+            policy=policy,
+            host=cfg.host,
+            port=cfg.port,
+            # metadata=policy_metadata,
+        )
+        server.serve_forever()
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, force=True)
     main(tyro.cli(ServeConfig))
